@@ -44,6 +44,10 @@ def main():
         if any(p == bad or p.endswith("/" + bad) for p in files):
             fail(f"{bad} is tracked; it must stay local")
 
+    keys = [p for p in files if p.lower().endswith((".pem", ".key", ".p12", ".pfx"))]
+    for k in keys:
+        fail(f"{k} looks like a private key; it must stay out of the repo")
+
     scenes = [p for p in files if p.endswith(".scene")]
     if not scenes:
         fail("no .scene file tracked")

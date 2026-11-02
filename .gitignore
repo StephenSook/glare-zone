@@ -22,3 +22,8 @@ leaf_plugin_settings.json
 
 # Local perf traces
 performance_traces/
+
+# Private keys (Lens Studio writes spk_debug_key.pem into the project folder)
+*.pem
+*.key
+*.p12
