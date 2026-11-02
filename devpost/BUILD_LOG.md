@@ -89,6 +89,16 @@ Recorded so Stephen can confirm or revert each one.
 - Pass is strictly outside the viewing area: a zone reaching exactly 60 cm fails (it passed before row 5). Labels round halves up, so 59.15 cm shows as 59.2.
 - The session has an end and a way to repeat: Save results shows the results view; Done keeps the lights; Restart puts the lights back to the standard placement to try again.
 
+## Confirmed on 2 November
+
+Decided by the orchestrator on Stephen's delegation.
+
+1. Keep the 3 m start.
+2. Done criterion 1: accept the change (the floor shows only the chosen eye height's zone, the other two as faint outlines; the answer card lists all three).
+3. Accept moving the results cards (C7 covers it).
+4. Keep the test-harness objects (LeafIndex, LEAF Plugin Bridge and any AiPreviewAgent handler). They act only when a test tool calls them.
+5. Unused packages (`Icons.lspkg`, `Motion.lspkg`): leave them for now. Remove them later only with a full LEAF re-run.
+
 ## Ghost lamp render order (trade-off)
 
 Snap's Design Best Practices advise against a high render order for virtual objects far from the user: far content drawn over near content reads as nearer and causes discomfort. The ghost lamp is the lamp's mirror image behind the wall, seen through the glass exactly where the glare spot is on the print. A depth-tested ghost lamp is hidden by the opaque print by construction, because the line from the eye to the ghost passes through the spot on the print. So the ghost lamp keeps depth testing off and render order 50. To limit the discomfort it is faint (alpha 0.25, was 0.45; LEAF C4 checks it stays under 0.3) and drawn only while the eye is in a glare zone (C4 checks it fades out on stepping out). The lamp-to-spot ray lies in front of the wall, so it now keeps depth testing and the default render order. A depth-tested ghost lamp was not tried in the preview; the reason above is geometric.
@@ -141,7 +151,6 @@ Helper scenarios, not tests: `media-film-04`, `media-film-05`, `media-film-07`, 
 - The near panels follow position only. If you turn around, they stay behind you until you raise your left palm and press "Bring panels here".
 - The palm-up detection runs only on a device with hand tracking; in the preview the button appears only through `showAt()`.
 - The MCP tool's time limit is shorter than the two longest scenarios plus the Lens reset; run C2 and C9 alone.
-- Film stills 01, 03, 05 and 06 were taken at v0.3.2 (row 7). The row 8 changes (floor view, More columns) are not in those frames, but their version label reads v0.3.2; 02, 04 and 07 are v0.3.3.
 - The More column gap follows the aim handle from the panels' eye point; for a "My eyes" height far from the presets the gap is kept inside the column's space and may no longer line up with the handle. Checked at the four presets only.
 - The floor labels are placed for the panels' eye point, so they read best from where the panels are; walking up to the wall leaves them where they were until the panels follow.
 - `preview_3x4.png` is a plain crop of one glare spot, its lamp ray and the print; a better framing may be wanted.
