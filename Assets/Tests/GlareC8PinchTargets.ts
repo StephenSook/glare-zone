@@ -86,11 +86,11 @@ export class GlareC8PinchTargets extends Scenario {
     check("seated, More open, knobs moved", MORE)
     await resetToStandard(c)
 
-    // The palm-up "Bring panels here" button, shown where a raised left palm would put it:
-    // about 40 cm out and 20 cm down from the eye.
+    // The palm-up hand menu (Bring panels here, Place in front of me, Place on a wall), shown
+    // where a raised left palm would put it: about 40 cm out and 20 cm down from the eye.
     c.handMenu().showAt(cam.getWorldTransform().multiplyPoint(new vec3(0, -20, -40)), 3)
     await sleep(200)
-    check("hand menu", ["Bring panels here button"])
+    check("hand menu", ["Bring panels here button", "Place in front of me button", "Place on a wall button"])
 
     await press(interactor, "Save results button")
     check("results view", ["Done button", "Restart button"])

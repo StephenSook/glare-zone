@@ -32,7 +32,7 @@ export class GlareC6MyEyes extends Scenario {
     expect(near(c.getEyeHeight(), eye0, 0.6), `My eyes height ${c.getEyeHeight()} vs camera ${eye0}`).toBe(true)
     expect(c.zoneVisible("my"), "My eyes zone drawn").toBe(true)
     expect(near(c.zoneFarEdgeCm("my"), 32.31, 0.5), `far edge ${c.zoneFarEdgeCm("my")} vs hand 32.31`).toBe(true)
-    expect(c.mapLaneText("my").indexOf("My eyes") === 0, `map lane: ${c.mapLaneText("my")}`).toBe(true)
+    expect(c.headlineText().indexOf("My eyes (160 cm):") === 0, `the card's line: ${c.headlineText()}`).toBe(true)
 
     // Crouch to 130 cm (the floor stays put, the eye drops): the zone reaches further.
     const z = c.eyeLocal().z
@@ -43,8 +43,8 @@ export class GlareC6MyEyes extends Scenario {
     expect(near(at130, 56.55, 0.05), `far edge at 130: ${at130} vs hand 56.55`).toBe(true)
     expect(c.zoneLabelText("my").indexOf("My eyes (130 cm)") === 0, `label: ${c.zoneLabelText("my")}`).toBe(true)
     // The headline follows the live eye height, and the answer card follows the view.
-    expect(c.headlineText(), "headline at 130 cm").toBe("Your eyes (130 cm) see glare up to 56.5 cm from the wall")
-    expect(c.mapLaneText("my"), "legend line at 130 cm").toBe("My eyes, at 130 cm: glare up to 56.5 cm from the wall")
+    expect(c.headlineText(), "headline at 130 cm").toBe("My eyes (130 cm): glare up to 56.5 cm (1 ft 10 in) from the wall")
+    expect(c.verdictLineText(), "verdict for the three eye heights").toBe("Glare in the viewing area: Seated, Child seated")
     // Under 140 cm the panels move below the print, and the answer card stays in view.
     expect(c.panelsAreBelow(), "panels below the print at 130 cm").toBe(true)
     expect(outOfView(c, c.answerPlateCorners()), "answer card in view after crouching").toBe("")
@@ -58,12 +58,12 @@ export class GlareC6MyEyes extends Scenario {
     // The fixed presets are not affected by the live eye.
     expect(c.zoneFarEdgeCm("seated"), "seated zone unchanged").toBe(seatedBefore)
 
-    // Back to Standing: the My eyes zone and map lane go away.
+    // Back to Standing: the My eyes zone goes away and the card's line is Standing's.
     await interactor.trigger(interactable("Eye height button"))
     await sleep(300)
     expect(c.getEyePreset()).toBe("standing")
     expect(c.zoneVisible("my"), "My eyes zone hidden for fixed presets").toBe(false)
-    expect(c.mapLaneText("my")).toBe("")
+    expect(c.headlineText().indexOf("Standing:") === 0, `the card's line back to Standing: ${c.headlineText()}`).toBe(true)
     await stepTo(c, new vec3(0, c.eyeLocal().y, 300))
     await resetToStandard(c)
   }

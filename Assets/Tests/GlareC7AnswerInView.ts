@@ -5,6 +5,7 @@ import {findSceneObjectByName, sleep} from "Leaf.lspkg/Utils/common/Utils"
 import {DefaultLeafInteractor} from "Leaf.lspkg/Interactors/interactor/DefaultLeafInteractor"
 import {EyePreset, ZoneKey} from "../Scripts/GlareZoneController"
 import {
+  AngularRect,
   aabbCorners,
   angularGap,
   angularRect,
@@ -18,11 +19,17 @@ import {
 
 // The answer each preset must state, from the brief's hand values at the standard placement
 // (80.78 cm): 0.40, 0.91 and 0.96 x 80.78 = 32.31, 73.51 and 77.55 cm; My eyes starts at 160.
+// Feet and inches by hand (1 in = 2.54 cm): 12.72, 28.94 and 30.53 in, to the nearest inch.
 const HEADLINE: {[k: string]: string} = {
-  standing: "Standing viewers see glare up to 32.3 cm from the wall",
-  seated: "Seated viewers see glare up to 73.5 cm from the wall",
-  child: "Seated children see glare up to 77.5 cm from the wall",
-  my: "Your eyes (160 cm) see glare up to 32.3 cm from the wall",
+  standing: "Standing: glare up to 32.3 cm (1 ft 1 in) from the wall",
+  seated: "Seated: glare up to 73.5 cm (2 ft 5 in) from the wall",
+  child: "Child seated: glare up to 77.5 cm (2 ft 7 in) from the wall",
+  my: "My eyes (160 cm): glare up to 32.3 cm (1 ft 1 in) from the wall",
+}
+
+/** How far (deg) one rectangle sticks out of another; 0 when it lies inside. */
+function overhang(inner: AngularRect, outer: AngularRect): number {
+  return Math.max(0, outer.x0 - inner.x0, inner.x1 - outer.x1, outer.y0 - inner.y0, inner.y1 - outer.y1)
 }
 
 /**
@@ -56,6 +63,13 @@ export class GlareC7AnswerInView extends Scenario {
     }
     const frameRect = angularRect(c, [new vec3(-55, 95, 0), new vec3(55, 205, 0)].map((p) => g.multiplyPoint(p)))
     expect(angularGap(frameRect, glazingRect()), "overlap check: the frame overlaps the glazing").toBeLessThan(0)
+
+    // Controls for the inside-the-card check: the card's backing lies inside itself, and the
+    // same backing moved 1 deg right sticks out by 1 deg.
+    const plate0 = angularRect(c, c.answerPlateCorners())
+    expect(overhang(plate0, plate0), "inside check passes the card itself").toBe(0)
+    const moved = {x0: plate0.x0 + 1, x1: plate0.x1 + 1, y0: plate0.y0, y1: plate0.y1}
+    expect(Math.abs(overhang(moved, plate0) - 1) < 1e-6, "inside check flags a rect 1 deg out").toBe(true)
 
     // At every preset, with More controls closed and then open: the headline states that
     // preset's answer, the card stays clear of the glazing (the print stays visible), and the
@@ -98,11 +112,15 @@ export class GlareC7AnswerInView extends Scenario {
       expect(gap, `${tag}: answer card clear of the glazing by ${gap.toFixed(2)} deg`).toBeGreaterThan(0)
       expect(outOfView(c, c.answerCardCorners(), 0.5), `${tag}: answer card corners in view`).toBe("")
       expect(outOfView(c, aabbCorners(c.headlineComponent()), 0.5), `${tag}: headline in view`).toBe("")
-      const lanes: ZoneKey[] = preset === "my" ? ["standing", "seated", "child", "my"] : ["standing", "seated", "child"]
-      for (const k of lanes) {
-        expect(c.mapLaneText(k) !== "", `${tag}: ${k} legend line shown`).toBe(true)
-        expect(outOfView(c, aabbCorners(c.mapLaneTextComponent(k)), 0.5), `${tag}: ${k} legend line in view`).toBe("")
-      }
+      // The longer lines (cm, then feet and inches) stay on the card: no text runs past its
+      // backing (the card's text overflows rather than wrapping).
+      const oh = overhang(angularRect(c, aabbCorners(c.headlineComponent())), cardRect)
+      expect(oh < 0.01, `${tag}: headline inside the answer card (${oh.toFixed(2)} deg out)`).toBe(true)
+      // Item D: the second line is the verdict for all three eye heights.
+      expect(c.verdictLineText(), `${tag}: verdict`).toBe("Glare in the viewing area: Seated, Child seated")
+      expect(outOfView(c, aabbCorners(c.verdictLineComponent()), 0.5), `${tag}: verdict in view`).toBe("")
+      const ov = overhang(angularRect(c, aabbCorners(c.verdictLineComponent())), cardRect)
+      expect(ov < 0.01, `${tag}: verdict inside the answer card (${ov.toFixed(2)} deg out)`).toBe(true)
       const controls = ["Eye height button", "Save results button", "More button"]
       if (moreOpen) controls.push("Dimmer slider L", "Dimmer slider R", "Distance slider L", "Distance slider R", "Paper art button")
       for (const name of controls) {
@@ -126,6 +144,19 @@ export class GlareC7AnswerInView extends Scenario {
         }
       }
     }
+
+    // While a light moves, each eye height's change line shows on the card too: in view and
+    // inside it (both lights to 62 cm, then back).
+    for (let i = 0; i < 2; i++) c.setLightDistance(i, 62)
+    await sleep(300)
+    const cardNow = angularRect(c, c.answerPlateCorners())
+    for (const k of ["standing", "seated", "child"] as ZoneKey[]) {
+      expect(c.mapLaneText(k).indexOf(" to ") > 0, `moving: ${k} change line shown (${c.mapLaneText(k)})`).toBe(true)
+      expect(outOfView(c, aabbCorners(c.mapLaneTextComponent(k)), 0.5), `moving: ${k} change line in view`).toBe("")
+      const oc = overhang(angularRect(c, aabbCorners(c.mapLaneTextComponent(k))), cardNow)
+      expect(oc < 0.01, `moving: ${k} change line inside the answer card (${oc.toFixed(2)} deg out)`).toBe(true)
+    }
+    await resetToStandard(c)
 
     const presets: EyePreset[] = ["standing", "seated", "child", "my"]
     for (const preset of presets) {

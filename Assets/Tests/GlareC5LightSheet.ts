@@ -43,14 +43,16 @@ export class GlareC5LightSheet extends Scenario {
     // and Restart shown, the headline answer still on top.
     expect(c.isResultsMode(), "results view after saving").toBe(true)
     expect(c.mapVisible(), "legend hidden behind the results").toBe(false)
-    expect(c.headlineText(), "headline still shown").toBe("Standing viewers see glare up to 32.3 cm from the wall")
+    expect(c.headlineText(), "headline still shown").toBe("Standing: glare up to 32.3 cm (1 ft 1 in) from the wall")
 
     // Done: results close, lights stay where they are.
     await interactor.trigger(interactable("Done button"))
     await sleep(300)
     expect(c.isResultsMode(), "Done closes the results").toBe(false)
     expect(c.cardCount(), "no cards after Done").toBe(0)
-    expect(c.mapVisible(), "legend back after Done").toBe(true)
+    // Back to the card at rest (item D): one line plus the verdict, no per-height lines.
+    expect(c.mapVisible(), "no per-height lines at rest after Done").toBe(false)
+    expect(c.verdictLineText(), "verdict back after Done").toBe("Glare in the viewing area: Seated, Child seated")
     expect(near(c.lights[0].distanceCm, D0, 0.01), "Done keeps the lights").toBe(true)
 
     // Slide both lights to 62 cm (the demo target) and save again: new cards, all pass.

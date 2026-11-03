@@ -13,16 +13,20 @@ export class GlareC1ZonesAppear extends Scenario {
     // Hand values (brief cases 2 and 3): D = (300 - 160) x 0.577 = 80.78; seated reach
     // 0.91 x 80.78 = 73.51, standing 0.40 x 80.78 = 32.31, child seated 0.96 x 80.78 = 77.55.
     for (const [key, label, h, reach, shown] of [
-      ["seated", "Seated", 109, 73.51, "73.5"],
-      ["standing", "Standing", 160, 32.31, "32.3"],
+      ["seated", "Seated", 109, 73.51, "73.5 cm (2 ft 5 in)"],
+      ["standing", "Standing", 160, 32.31, "32.3 cm (1 ft 1 in)"],
     ] as ["seated" | "standing", string, number, number, string][]) {
+      c.setEyePreset("standing")
+      await sleep(200)
       expect(c.zoneVisible(key), `${label} zone mesh visible`).toBe(true)
       expect(c.zoneQuadCount(key), `${label} zone has floor rows`).toBeGreaterThan(5)
       expect(near(c.zoneFarEdgeCm(key), reach, 0.05), `${label} far edge ${c.zoneFarEdgeCm(key)} vs hand ${reach}`).toBe(true)
       expect(c.zoneNearEdgeCm(key), `${label} zone starts at the wall (glazing bottom 100 cm, below every eye)`).toBe(0)
-      // The legend on the answer card, in view from the first frame: one plain line per
-      // eye height, with units.
-      expect(c.mapLaneText(key), `${label} legend line`).toBe(`${label}, eyes at ${h} cm: glare up to ${shown} cm from the wall`)
+      // The reach in the words the card uses (cm, then feet and inches: 32.31 cm = 12.72 in,
+      // 73.51 cm = 28.94 in) when that eye height is chosen.
+      c.setEyePreset(key)
+      await sleep(200)
+      expect(c.headlineText(), `${label} line on the card (eyes at ${h} cm)`).toBe(`${label}: glare up to ${shown} from the wall`)
     }
     expect(near(c.zoneFarEdgeCm("child"), 77.55, 0.05), `child far edge ${c.zoneFarEdgeCm("child")} vs hand 77.55`).toBe(true)
     // The brief's worked numbers, shown on the floor: the chosen eye height's zone is filled
@@ -37,16 +41,16 @@ export class GlareC1ZonesAppear extends Scenario {
     expect(c.zoneLabelText("seated")).toBe("Seated: glare up to 73.5 cm from the wall")
     c.setEyePreset("standing")
     await sleep(300)
-    expect(c.mapLaneText("child")).toBe("Child seated, eyes at 104 cm: glare up to 77.5 cm from the wall")
-    expect(c.mapVisible(), "legend shown in the opening view").toBe(true)
-    expect(c.mapLaneText("my"), "no My eyes line until that preset is chosen").toBe("")
+    // Item D: at rest the card is one line plus the verdict; no map and no per-height lines.
+    expect(c.mapVisible(), "no map or per-height lines at rest").toBe(false)
+    expect(c.mapLaneText("child"), "no child seated line at rest").toBe("")
 
-    // The top line states the answer for the chosen eye height; the disclosure is the
-    // smaller second line.
-    expect(c.headlineText(), "headline states the answer").toBe("Standing viewers see glare up to 32.3 cm from the wall")
-    expect(c.disclaimerText(), "disclosure as the second line").toBe("Computed reflection, sample lamp values, not measured")
-    expect(c.viewingLabelText(), "viewing area in plain words").toBe("Viewing area: 60 to 182 cm from the wall")
-    expect(c.versionText(), "version shown").toBe("v0.3.3")
+    // The top line states the answer for the chosen eye height, the second the verdict for
+    // all three; the disclosure is the small third line.
+    expect(c.headlineText(), "the one line").toBe("Standing: glare up to 32.3 cm (1 ft 1 in) from the wall")
+    expect(c.verdictLineText(), "the verdict").toBe("Glare in the viewing area: Seated, Child seated")
+    expect(c.disclaimerText(), "disclosure").toBe("Computed reflection, sample lamp values, not measured")
+    expect(c.versionText(), "version shown").toBe("v0.4")
     // The unexplained "You" marker is gone from the map. Positive control: the same lookup
     // finds a map label that does exist.
     expect(findSceneObjectByName("Map wall label") !== undefined, "lookup finds an existing map label").toBe(true)

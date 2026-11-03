@@ -123,6 +123,20 @@ export function oneDecimal(x: number): string {
   return (Math.round(x * 10 + 1e-6) / 10).toFixed(1)
 }
 
+/** A length in feet and whole inches (1 in = 2.54 cm): 62 cm is "2 ft 0 in", 10 cm is "4 in". */
+export function feetInches(cm: number): string {
+  // Round to the nearest inch first, so 30.4 cm (11.97 in) reads "1 ft 0 in", not "0 ft 12 in".
+  const inches = Math.round(Math.max(0, cm) / 2.54 + 1e-6)
+  const ft = Math.floor(inches / 12)
+  const rest = inches - ft * 12
+  return ft > 0 ? `${ft} ft ${rest} in` : `${rest} in`
+}
+
+/** A reach on the answer card: cm to one decimal, then feet and inches, "73.5 cm (2 ft 5 in)". */
+export function cmAndFeet(cm: number): string {
+  return `${oneDecimal(cm)} cm (${feetInches(cm)})`
+}
+
 /** Pass means the reach stays strictly inside the viewing area's near edge. */
 export function passesNearEdge(reach: number, nearEdgeCm: number = VIEWING_NEAR_CM): boolean {
   return reach < nearEdgeCm
@@ -391,6 +405,108 @@ export function overlapRows(rows: ZoneRow[], nearCm: number, farCm: number, half
       xMin: Math.max(r.xMin, -halfWidthCm),
       xMax: Math.min(r.xMax, halfWidthCm),
     })
+  }
+  return out
+}
+
+/**
+ * How deep a zone reaches into the viewing area: the depth its overlap rows span, or null
+ * when the zone stays outside the area. A zone touching an edge is inside, depth 0.
+ */
+export function insideDepth(overlap: ZoneRow[]): number | null {
+  if (overlap.length === 0) return null
+  let a = Number.POSITIVE_INFINITY
+  let b = Number.NEGATIVE_INFINITY
+  for (const r of overlap) {
+    a = Math.min(a, r.z0)
+    b = Math.max(b, r.z1)
+  }
+  return b - a
+}
+
+/** One eye height's result: its zone's far end, and how deep it reaches into the viewing area. */
+export type EyeResult = { key: string; endCm: number; insideCm: number | null }
+
+/**
+ * The overall answer for all eye heights: "clear" only when every zone stays outside the
+ * viewing area and every number is a real number; anything that cannot be computed is
+ * "glare", so a failure never shows as clear.
+ */
+export function overallVerdict(eyes: EyeResult[]): "clear" | "glare" {
+  if (eyes.length === 0) return "glare"
+  for (const e of eyes) {
+    if (!Number.isFinite(e.endCm)) return "glare"
+    if (e.insideCm !== null) return "glare"
+  }
+  return "clear"
+}
+
+/** A light whose numbers are all real can be computed; one with a missing or broken value cannot. */
+export function lightComputable(light: Light): boolean {
+  return [light.xCm, light.distanceCm, light.tiltDeg, light.dimmer].every((v) => Number.isFinite(v))
+}
+
+/** Zone rows can be used only when every number in them is real. */
+export function rowsComputable(rows: ZoneRow[]): boolean {
+  return rows.every((r) => [r.z0, r.z1, r.xMin, r.xMax].every((v) => Number.isFinite(v)))
+}
+
+function nameList(names: string[]): string {
+  return names.join(", ")
+}
+
+/**
+ * The verdict in words, for the floor status line and the answer card: "All three: clear"
+ * only when overallVerdict is "clear"; otherwise which eye heights see glare in the viewing
+ * area and which cannot be computed (read as glare).
+ */
+export function verdictText(eyes: EyeResult[], names: { [key: string]: string }): string {
+  if (overallVerdict(eyes) === "clear") return "All three: clear"
+  const bad = eyes.filter((e) => !Number.isFinite(e.endCm)).map((e) => names[e.key] || e.key)
+  const inside = eyes.filter((e) => Number.isFinite(e.endCm) && e.insideCm !== null).map((e) => names[e.key] || e.key)
+  const parts: string[] = []
+  if (inside.length > 0) parts.push(`Glare in the viewing area: ${nameList(inside)}`)
+  if (bad.length > 0) {
+    const who = bad.length === eyes.length && eyes.length === 3 ? "all three" : nameList(bad)
+    parts.push(inside.length > 0 ? `cannot be computed: ${who}` : `Glare (cannot be computed): ${who}`)
+  }
+  return parts.length > 0 ? parts.join("; ") : "Glare (no eye heights)"
+}
+
+function logNum(x: number): string {
+  return Number.isFinite(x) ? x.toFixed(2) : "nan"
+}
+
+/**
+ * One line of the session log, written once per light move. Plain key=value pairs, so a
+ * Logger export can be read back by devpost/tools/summarize_session.py. "_in_cm" is how deep
+ * that eye height's zone reaches into the viewing area, "-" when it stays outside.
+ */
+export function moveLogLine(
+  seq: number,
+  light: string,
+  distanceCm: number,
+  tiltDeg: number,
+  nearCm: number,
+  farCm: number,
+  eyes: EyeResult[],
+): string {
+  const parts = [`GLARE_LOG seq=${seq}`, `light=${light}`, `distance_cm=${logNum(distanceCm)}`, `tilt_deg=${logNum(tiltDeg)}`]
+  for (const e of eyes) parts.push(`${e.key}_end_cm=${logNum(e.endCm)}`)
+  parts.push(`viewing_near_cm=${logNum(nearCm)}`, `viewing_far_cm=${logNum(farCm)}`)
+  for (const e of eyes) parts.push(`${e.key}_in_cm=${e.insideCm === null ? "-" : logNum(e.insideCm)}`)
+  parts.push(`verdict=${overallVerdict(eyes)}`)
+  return parts.join(" ")
+}
+
+/** Parse a session log line back into its fields (the same rules the Python summary uses). */
+export function parseLogLine(line: string): { [k: string]: string } | null {
+  const i = line.indexOf("GLARE_LOG ")
+  if (i < 0) return null
+  const out: { [k: string]: string } = {}
+  for (const tok of line.slice(i + "GLARE_LOG ".length).trim().split(/\s+/)) {
+    const eq = tok.indexOf("=")
+    if (eq > 0) out[tok.slice(0, eq)] = tok.slice(eq + 1)
   }
   return out
 }

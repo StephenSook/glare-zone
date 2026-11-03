@@ -1,7 +1,8 @@
 // LEAF scenario: the floor view reads in one glance (BUILD_LOG row 8). The viewing area is a
 // filled band with a bold, labelled near edge; the chosen eye height's zone is filled on top
 // and the other two are faint outlines; where the chosen zone reaches into the viewing area
-// a bright warning fill shows, with a status line that turns to "clear" when it is gone.
+// a bright warning fill shows, with a status line that reads "All three: clear" only when
+// every eye height is clear (v0.4 item A).
 import {Scenario} from "Leaf.lspkg/Scenarios/scenario/Scenario"
 import {expect} from "Leaf.lspkg/Utils/common/Expect"
 import {sleep} from "Leaf.lspkg/Utils/common/Utils"
@@ -63,7 +64,7 @@ export class GlareC12FloorOverlap extends Scenario {
     expect(c.overlapRenderOrder() > so, "overlap drawn over the Seated zone").toBe(true)
     const oc = c.overlapColor()
     expect(warningColourOk(oc, amber), `overlap colour bright and distinct: (${oc.x}, ${oc.y}, ${oc.z}, ${oc.w})`).toBe(true)
-    expect(c.floorStatusText(), "status line").toBe("Seated: glare inside the viewing area")
+    expect(c.floorStatusText(), "status line").toBe("Glare in the viewing area: Seated, Child seated")
 
     // The viewing area: a filled band 60 to 182 cm, 200 cm wide, and a bold labelled near edge.
     const band = c.viewingFillExtent()
@@ -90,20 +91,22 @@ export class GlareC12FloorOverlap extends Scenario {
     }
 
     // Slide both lights to 62 cm (the demo target): the seated zone ends at 56.42 cm, short of
-    // the near edge, so the overlap is gone and the status reads clear.
+    // the near edge, so the overlap is gone; child seated ends at 0.96 x 62 = 59.52 cm, also
+    // short of it, so all three are clear.
     c.setLightDistance(0, 62)
     c.setLightDistance(1, 62)
     await sleep(300)
     expect(near(c.zoneFarEdgeCm("seated"), SEATED_FAR_AT_62, 0.1), `seated far edge ${c.zoneFarEdgeCm("seated")} vs fixture ${SEATED_FAR_AT_62}`).toBe(true)
     expect(c.overlapVisible(), "no glare inside the viewing area at 62 cm").toBe(false)
     expect(c.overlapDepth().max, "no overlap depth at 62 cm").toBe(0)
-    expect(c.floorStatusText(), "status line at 62 cm").toBe("Seated: clear")
+    expect(c.floorStatusText(), "status line at 62 cm").toBe("All three: clear")
     expect(c.zoneLabelText("seated")).toBe("Seated: glare up to 56.4 cm from the wall")
 
-    // And at Standing (standard placement), the standing zone (32.31 cm) is clear too.
+    // At Standing (standard placement) the standing zone (32.31 cm) stays out of the area, but
+    // seated and child seated reach in, so the status is not clear.
     await resetToStandard(c)
     expect(c.zoneFilled("standing"), "Standing zone filled when chosen").toBe(true)
     expect(c.overlapVisible(), "Standing: no overlap").toBe(false)
-    expect(c.floorStatusText()).toBe("Standing: clear")
+    expect(c.floorStatusText(), "Standing chosen, others inside: not clear").toBe("Glare in the viewing area: Seated, Child seated")
   }
 }

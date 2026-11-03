@@ -23,7 +23,8 @@ export function interactable(name: string): Interactable {
 
 /**
  * Standard placement: both lights 80.78 cm out, aimed at the print centre, full dimmer,
- * standing eyes, back at the start position (3 m from the wall, on the centre line).
+ * standing eyes, back at the start position (3 m from the wall, on the centre line), the wall
+ * set down in front of the viewer as at launch ("Place in front of me", 3 m).
  */
 export async function resetToStandard(c: GlareZoneController): Promise<void> {
   const D0 = G.standardPlacementCm()
@@ -36,6 +37,7 @@ export async function resetToStandard(c: GlareZoneController): Promise<void> {
   c.setWorksOnPaper(false)
   c.setViewingArea(G.VIEWING_NEAR_CM, G.VIEWING_FAR_CM)
   c.restart() // also closes any results
+  c.placeInFront(LAYOUT.startDistanceCm) // also stops any wall aiming
   c.setEyePreset("standing")
   c.setMoreOpen(false)
   await stepTo(c, new vec3(0, c.eyeLocal().y, LAYOUT.startDistanceCm))

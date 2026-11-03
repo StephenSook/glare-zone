@@ -17,7 +17,7 @@
 // Pinch targets (Snap sizing guide): at least 2 deg across and at least 1 deg apart.
 // At about 1 m: 3.5 cm and 1.75 cm. At 3 m: 10.5 cm and 5.2 cm.
 
-export const LENS_VERSION = "v0.3.3"
+export const LENS_VERSION = "v0.4"
 
 export const LAYOUT = {
   startDistanceCm: 300, // the user starts this far back from the wall
@@ -88,7 +88,7 @@ export const LAYOUT = {
   // Results cards, one per light, in the answer card after "Save results".
   cardWidth: 23,
   cardX: 12,
-  cardY: -2.3,
+  cardY: -2.8, // under the verdict and the disclosure (item D)
   cardEm: 0.8,
   cardSmallEm: 0.68,
 

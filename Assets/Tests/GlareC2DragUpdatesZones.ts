@@ -93,7 +93,10 @@ export class GlareC2DragUpdatesZones extends Scenario {
     expect(near(handReach(80.78, c.lights[1].tiltDeg, 109), 73.51, 0.05), "hand seated reach at rest").toBe(true)
     expect(near(handReach(80.78, c.lights[1].tiltDeg, 160), 32.31, 0.05), "hand standing reach at rest").toBe(true)
     const tiltBefore = c.lights[1].tiltDeg
-    const tilt = interactor.drag(handleR, galleryDir(c, new vec3(0, -0.2, 0)), 2000)
+    // The beam's top passes the glass top about 2.6 deg below the rest tilt. A 0.2 drag over
+    // 2 s stopped only 0.2 deg past it (2 or 3 samples, by frame timing), so the drag is 0.3
+    // over 3 s: the same speed (same lag), with well over 3 samples past the glass top.
+    const tilt = interactor.drag(handleR, galleryDir(c, new vec3(0, -0.3, 0)), 3000)
     const tiltSamples = await sampleWhileHeld(tilt, () => knobR.isHeld,
       () => [c.lights[1].tiltDeg, c.zoneFarEdgeCm("seated"), c.zoneFarEdgeCm("standing"), c.lights[1].distanceCm])
     expect(tiltSamples.length, "tilt: samples taken while held").toBeGreaterThan(MIN_WAYPOINTS - 1)

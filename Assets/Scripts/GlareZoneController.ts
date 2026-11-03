@@ -3,6 +3,8 @@ import {DynamicMesh, Quad, barQuads, boxQuads, discQuads, makeText, rectXY, rect
 import {DragKnob} from "./DragKnob"
 import {GlareZoneUI} from "./GlareZoneUI"
 import {GlareHandMenu} from "./GlareHandMenu"
+import {GlareWallPlacer, WallHit} from "./GlareWallPlacer"
+import * as P from "./PlacementMath"
 import {LAYOUT, LENS_VERSION} from "./GlareLayout"
 import {BackPlate} from "SpectaclesUIKit.lspkg/Scripts/BackPlate"
 import {smoothDamp} from "SpectaclesInteractionKit.lspkg/Utils/mathUtils"
@@ -10,6 +12,7 @@ import {smoothDamp} from "SpectaclesInteractionKit.lspkg/Utils/mathUtils"
 export type EyeKey = "standing" | "seated" | "child"
 export type ZoneKey = EyeKey | "my"
 export type EyePreset = ZoneKey
+export type Placement = {kind: "front" | "wall"; distanceCm: number; hit: vec3 | null; normal: vec3 | null}
 
 type Eye = {key: EyeKey; label: string; heightCm: number; color: vec3; viewers: string}
 
@@ -31,12 +34,13 @@ const LANES: ZoneKey[] = ["standing", "seated", "child", "my"]
 const PLOT_X0 = -22.5
 const PLOT_W = 13
 const PLOT_RANGE_CM = 200
-const LANE_Y0 = 2.3
+const LANE_Y0 = 0.8 // the change lines, under the disclosure (item D)
 const LANE_STEP = 2.05
 const LANE_H = 1.4
 const LEGEND_TEXT_X = -8.3
 const HEADLINE_Y = 6.4
-const DISCLAIMER_Y = 4.4
+const VERDICT_Y = 4.5
+const DISCLAIMER_Y = 2.9
 const VIEWING_TINT = new vec4(1, 1, 1, 0.22)
 
 // Light, low-opacity backing behind text floating over the room (never black: black
@@ -63,6 +67,14 @@ const AMBER = new vec4(1.0, 0.6, 0.05, 0.62)
 const FULL_ALPHA = 0.55
 const FAINT_ALPHA = 0.3
 const ADJUST_HOLD_S = 1.2
+
+// Floor rings (v0.4 item C): one per eye height in the viewing area. Stand in one for
+// RING_HOLD_S and the Lens switches to that eye height; stepping out first cancels.
+const RING_Z_CM = 150 // cm from the wall, inside the 60 to 182 cm viewing area
+const RING_X_CM = [-60, 0, 60] // Standing, Seated, Child seated
+const RING_RADIUS_CM = 22
+const RING_WIDTH_CM = 3
+const RING_HOLD_S = 1.0
 const AIM_GAIN = 1.5 // aim point moves 1.5 cm per cm the hand moves up or down
 const AMBER_CELL_CM = 5
 const ZONE_ROW_CM = 2
@@ -124,6 +136,17 @@ export class GlareZoneController extends BaseScriptComponent {
   private zoneMats: {[k: string]: Material} = {}
   private zoneLabels: {[k: string]: Text} = {}
   private zoneRows: {[k: string]: G.ZoneRow[]} = {}
+  // Eye heights whose zone cannot be computed (a light with a broken value): read as glare.
+  private zoneBad: {[k: string]: boolean} = {}
+  // Fixed meshes by name (the first of each name), for the real-scale check (item 6b).
+  private drawnMeshes: {[k: string]: DynamicMesh} = {}
+  private ringMeshes: {[k: string]: DynamicMesh} = {}
+  private ringMats: {[k: string]: Material} = {}
+  private ringProgressMesh!: DynamicMesh
+  private ringKey = ""
+  private ringSince = 0
+  private ringFired = false
+  private ringShown = -1
   private bandMats: {[k: string]: Material} = {}
   private amberMesh!: DynamicMesh
   private spotOuter!: DynamicMesh
@@ -161,6 +184,7 @@ export class GlareZoneController extends BaseScriptComponent {
   private answerCard!: SceneObject
   private controlsPanel!: SceneObject
   private headline!: Text
+  private verdictLine!: Text
   private disclaimer!: Text
   private versionLabel!: Text
   private legend!: SceneObject
@@ -181,6 +205,18 @@ export class GlareZoneController extends BaseScriptComponent {
   private follow = {x: 0, z: LAYOUT.startDistanceCm, s: 1, yaw: 0, vx: 0, vz: 0, vs: 0, moving: false}
   private morePanel!: SceneObject
   private menu!: GlareHandMenu
+  private placer!: GlareWallPlacer
+  // How the practice wall was last placed: "front" (Place in front of me, and the start) or
+  // "wall" (a World Query wall hit), with the hit and the distance from the eye at the time.
+  private placement: Placement = {kind: "front", distanceCm: LAYOUT.startDistanceCm, hit: null, normal: null}
+  // The session log: one GLARE_LOG line per light move. A move opens at the first change and
+  // closes when adjusting settles (no knob held, ADJUST_HOLD_S since the last change); then
+  // each light whose distance or tilt changed since its last line gets one line.
+  private logSeq = 0
+  private logBuffer: string[] = []
+  private loggedLights: {d: number; t: number}[] = []
+  private moveOpen = false
+  private moveStartEnds: {[k: string]: number} = {}
 
   onAwake(): void {
     print(`Lens Opened: ${LENS_VERSION}`)
@@ -188,9 +224,10 @@ export class GlareZoneController extends BaseScriptComponent {
     const tilt0 = G.tiltForAim(50, D0, 150)
     this.lights.push({xCm: -50, distanceCm: D0, tiltDeg: tilt0, dimmer: 1})
     this.lights.push({xCm: 50, distanceCm: D0, tiltDeg: tilt0, dimmer: 1})
+    this.loggedLights = this.lights.map((l) => ({d: l.distanceCm, t: l.tiltDeg}))
     this.buildGallery()
     this.createEvent("OnStartEvent").bind(() => {
-      this.placeGallery()
+      this.placeInFront(LAYOUT.startDistanceCm)
       this.wireUi()
     })
     this.createEvent("UpdateEvent").bind(() => this.onUpdate())
@@ -255,7 +292,8 @@ export class GlareZoneController extends BaseScriptComponent {
   setLightDistance(light: number, cm: number): void {
     this.lights[light].distanceCm = G.clamp(cm, G.TRACK_MIN_CM, G.TRACK_MAX_CM)
     this.markAdjusted()
-    if (this.ui) this.ui.setDistance(light, this.lights[light].distanceCm)
+    const d = this.lights[light].distanceCm
+    if (this.ui && Number.isFinite(d)) this.ui.setDistance(light, d)
   }
 
   setLightTilt(light: number, tiltDeg: number): void {
@@ -334,6 +372,10 @@ export class GlareZoneController extends BaseScriptComponent {
       `Dimmer ${Math.round(l.dimmer * 100)}%`,
     ]
     for (const eye of EYES) {
+      if (!G.lightComputable(l)) {
+        lines.push(`${eye.label}, eyes ${eye.heightCm} cm: FAIL, cannot be computed`)
+        continue
+      }
       const pass = G.passesViewingArea(l, eye.heightCm, this.viewingNearCm, this.viewingFarCm, LAYOUT.viewingHalfWidth)
       const depth = G.zoneDepth(l, eye.heightCm)
       const reach = depth ? `glare to ${G.oneDecimal(depth.max)} cm` : "no glare"
@@ -548,6 +590,72 @@ export class GlareZoneController extends BaseScriptComponent {
     return getTime() - this.lastAdjustTime < ADJUST_HOLD_S
   }
 
+  /** Each eye height's zone end, and how deep it reaches into the viewing area (null: outside). */
+  eyeResults(): G.EyeResult[] {
+    return EYES.map((e) => {
+      const rows = this.zoneRows[e.key] || []
+      const overlap = G.overlapRows(rows, this.viewingNearCm, this.viewingFarCm, LAYOUT.viewingHalfWidth)
+      if (this.zoneBad[e.key]) return {key: e.key, endCm: Number.NaN, insideCm: null}
+      return {key: e.key, endCm: G.zoneFarEdge(rows), insideCm: G.insideDepth(overlap)}
+    })
+  }
+
+  /** The answer for all three eye heights: "clear" only when every zone stays out of the area. */
+  verdict(): "clear" | "glare" {
+    return G.overallVerdict(this.eyeResults())
+  }
+
+  /** The verdict in words: "All three: clear", or which eye heights see glare or cannot be computed. */
+  verdictText(): string {
+    const names: {[k: string]: string} = {}
+    for (const e of EYES) names[e.key] = e.label
+    return G.verdictText(this.eyeResults(), names)
+  }
+
+  /** True when an eye height's zone cannot be computed (it then reads as glare). */
+  zoneUncomputable(key: ZoneKey): boolean {
+    return !!this.zoneBad[key]
+  }
+
+  /** The session log lines written so far (the last 50), oldest first. */
+  logLines(): string[] {
+    return this.logBuffer.slice()
+  }
+
+  /** How many session log lines have been written since the Lens opened. */
+  logCount(): number {
+    return this.logSeq
+  }
+
+  /** True between a light's first change and the moment adjusting settles. */
+  isMoveOpen(): boolean {
+    return this.moveOpen
+  }
+
+  /** An eye height's zone end when the current move began (the end now if no move is open). */
+  moveStartEnd(key: ZoneKey): number {
+    return this.moveOpen && key in this.moveStartEnds ? this.moveStartEnds[key] : this.zoneFarEdgeCm(key)
+  }
+
+  /** Close the open move: one log line for each light whose distance or tilt changed. */
+  private closeMove(): void {
+    this.moveOpen = false
+    this.rebuildLegend() // the change lines go back to the reach lines
+    const eyes = this.eyeResults()
+    for (let i = 0; i < this.lights.length; i++) {
+      const l = this.lights[i]
+      const was = this.loggedLights[i]
+      if (Math.abs(l.distanceCm - was.d) < 1e-6 && Math.abs(l.tiltDeg - was.t) < 1e-6) continue
+      this.loggedLights[i] = {d: l.distanceCm, t: l.tiltDeg}
+      this.logSeq++
+      const line = G.moveLogLine(this.logSeq, i === 0 ? "L" : "R", l.distanceCm, l.tiltDeg,
+        this.viewingNearCm, this.viewingFarCm, eyes)
+      this.logBuffer.push(line)
+      if (this.logBuffer.length > 50) this.logBuffer.shift()
+      print(line)
+    }
+  }
+
   /** The eye (camera) position in gallery-local centimetres. */
   eyeLocal(): vec3 {
     const cam = this.cameraObject.getTransform().getWorldPosition()
@@ -558,16 +666,226 @@ export class GlareZoneController extends BaseScriptComponent {
     return this.gallery
   }
 
+  // ------------------------------------------------------------------ wall placement
+
+  /**
+   * "Place on a wall": aim at a wall and pinch. The World Query placer runs until a wall hit
+   * is placed or "Place in front of me" is chosen. False when World Query is not available.
+   */
+  startWallPlacement(): boolean {
+    return this.placer.begin()
+  }
+
+  isPlacingOnWall(): boolean {
+    return this.placer.isActive()
+  }
+
+  wallPlacer(): GlareWallPlacer {
+    return this.placer
+  }
+
+  /**
+   * Use a World Query hit: if its normal is near horizontal (a wall), the practice wall and
+   * print go there, upright, facing the viewer, the floor still at the chosen eye height below
+   * the eye. False, and nothing moves, when the hit is not a wall.
+   */
+  placeOnWallHit(position: vec3, normal: vec3): boolean {
+    if (!P.isWallNormal(normal)) return false
+    const eye = this.cameraObject.getTransform().getWorldPosition()
+    this.placeGalleryAt(position.x, position.z, P.wallYaw(normal, position, eye))
+    const dx = eye.x - position.x
+    const dz = eye.z - position.z
+    this.placement = {kind: "wall", distanceCm: Math.sqrt(dx * dx + dz * dz), hit: position, normal}
+    this.placer.stop()
+    return true
+  }
+
+  /**
+   * "Place in front of me": the practice wall is set down once in front of the viewer,
+   * facing them, between 0.5 m and 3 m away (the start uses 3 m). It stays where it is put:
+   * never head-locked. Returns the distance used.
+   */
+  placeInFront(distanceCm: number = LAYOUT.startDistanceCm): number {
+    const d = P.frontDistanceCm(distanceCm)
+    const camT = this.cameraObject.getTransform()
+    const view = camT.getWorldRotation().multiplyVec3(new vec3(0, 0, -1))
+    const yaw = P.yawFacingViewer(view.x, view.z)
+    const out = quat.angleAxis(yaw, vec3.up()).multiplyVec3(vec3.forward())
+    const cam = camT.getWorldPosition()
+    this.placeGalleryAt(cam.x - out.x * d, cam.z - out.z * d, yaw)
+    this.placement = {kind: "front", distanceCm: d, hit: null, normal: null}
+    if (this.placer) this.placer.stop()
+    return d
+  }
+
+  /** How the wall was last placed (for the LEAF checks). */
+  placementInfo(): Placement {
+    return this.placement
+  }
+
+  /** The practice wall's pose in world space: its base point, the way out of it, and its up. */
+  wallPose(): {origin: vec3; out: vec3; up: vec3} {
+    const t = this.gallery.getTransform()
+    const r = t.getWorldRotation()
+    return {origin: t.getWorldPosition(), out: r.multiplyVec3(vec3.forward()), up: r.multiplyVec3(vec3.up())}
+  }
+
   // ===================================================================== building
 
   private mat(color: vec4): Material {
     return tintedMaterial(this.baseMaterial, color)
   }
 
+  /** A flat ring (or part of one) on the floor, as quads, from angle a0 to a1 (radians). */
+  private ringQuads(cx: number, cz: number, r0: number, r1: number, a0: number, a1: number, y: number): Quad[] {
+    const quads: Quad[] = []
+    const segs = Math.max(2, Math.ceil(((a1 - a0) / (Math.PI * 2)) * 48))
+    for (let s = 0; s < segs; s++) {
+      const t0 = a0 + ((a1 - a0) * s) / segs
+      const t1 = a0 + ((a1 - a0) * (s + 1)) / segs
+      quads.push({
+        a: new vec3(cx + Math.cos(t0) * r0, y, cz + Math.sin(t0) * r0),
+        b: new vec3(cx + Math.cos(t0) * r1, y, cz + Math.sin(t0) * r1),
+        c: new vec3(cx + Math.cos(t1) * r1, y, cz + Math.sin(t1) * r1),
+        d: new vec3(cx + Math.cos(t1) * r0, y, cz + Math.sin(t1) * r0),
+      })
+    }
+    return quads
+  }
+
+  /** The floor rings: one per eye height, in its colour, with its name in front of it. */
+  private buildRings(): void {
+    EYES.forEach((e, i) => {
+      const mat = this.mat(new vec4(e.color.x, e.color.y, e.color.z, 0.6))
+      this.ringMats[e.key] = mat
+      const m = new DynamicMesh(this.floor, `Eye height ring ${e.label}`, mat)
+      m.setQuads(this.ringQuads(RING_X_CM[i], RING_Z_CM, RING_RADIUS_CM - RING_WIDTH_CM, RING_RADIUS_CM, 0, Math.PI * 2, 0.4))
+      this.ringMeshes[e.key] = m
+      const t = makeText(this.floor, `Eye height ring label ${e.label}`, e.label, LAYOUT.floorLabelEm * 0.7,
+        new vec4(e.color.x, e.color.y, e.color.z, 1))
+      this.backText(t, 1.5)
+      t.setRenderOrder(FLOOR_RENDER.label)
+      // In front of the ring, tilted to face the start position (eyes 160 cm up, 3 m out).
+      const tilt = Math.atan2(G.EYE_STANDING_CM, LAYOUT.startDistanceCm - RING_Z_CM)
+      const tr = t.getSceneObject().getTransform()
+      tr.setLocalPosition(new vec3(RING_X_CM[i], 1, RING_Z_CM + RING_RADIUS_CM + 8))
+      tr.setLocalRotation(quat.angleAxis(-tilt, vec3.right()))
+    })
+    this.ringProgressMesh = new DynamicMesh(this.floor, "Eye height ring progress", this.mat(new vec4(1, 1, 1, 0.95)))
+  }
+
+  /**
+   * Standing in a ring for RING_HOLD_S switches to that eye height; stepping out first
+   * cancels. A white arc fills the ring while you hold.
+   */
+  private updateRings(eye: vec3): void {
+    let inKey = ""
+    let index = -1
+    EYES.forEach((e, i) => {
+      const dx = eye.x - RING_X_CM[i]
+      const dz = eye.z - RING_Z_CM
+      if (dx * dx + dz * dz <= RING_RADIUS_CM * RING_RADIUS_CM) {
+        inKey = e.key
+        index = i
+      }
+    })
+    const now = getTime()
+    if (inKey !== this.ringKey) {
+      this.ringKey = inKey
+      this.ringSince = now
+      this.ringFired = false
+    }
+    let progress = 0
+    if (inKey !== "" && !this.ringFired) {
+      progress = Math.min(1, (now - this.ringSince) / RING_HOLD_S)
+      if (progress >= 1) {
+        this.ringFired = true
+        progress = 0
+        if (this.eyePreset !== inKey) this.setEyePreset(inKey as EyePreset)
+      }
+    }
+    const shown = Math.round(progress * 50) / 50
+    if (shown !== this.ringShown) {
+      this.ringShown = shown
+      this.ringProgressMesh.setQuads(shown > 0 && index >= 0
+        ? this.ringQuads(RING_X_CM[index], RING_Z_CM, RING_RADIUS_CM - RING_WIDTH_CM - 1, RING_RADIUS_CM + 1,
+          -Math.PI / 2, -Math.PI / 2 + shown * Math.PI * 2, 0.6)
+        : [])
+    }
+    for (const e of EYES) this.setAlpha(this.ringMats[e.key], this.eyePreset === e.key ? 0.95 : 0.5)
+  }
+
+  /** A ring's centre on the practice floor (gallery-local cm), for tests and captures. */
+  ringCentre(key: ZoneKey): vec3 {
+    const i = EYES.map((e) => e.key as string).indexOf(key)
+    return new vec3(RING_X_CM[Math.max(0, i)], 0, RING_Z_CM)
+  }
+
+  ringRadiusCm(): number {
+    return RING_RADIUS_CM
+  }
+
+  /** Which ring the eye is in ("" for none), and how far the hold has gone (0 to 1). */
+  ringState(): {key: string; progress: number; fired: boolean} {
+    const p = this.ringKey !== "" && !this.ringFired ? Math.min(1, (getTime() - this.ringSince) / RING_HOLD_S) : 0
+    return {key: this.ringKey, progress: p, fired: this.ringFired}
+  }
+
+  ringQuadCount(key: ZoneKey): number {
+    return this.ringMeshes[key] ? this.ringMeshes[key].count : 0
+  }
+
   private staticMesh(parent: SceneObject, name: string, color: vec4, quads: Quad[], normal?: vec3): DynamicMesh {
     const m = new DynamicMesh(parent, name, this.mat(color))
     m.setQuads(quads, normal)
+    if (!(name in this.drawnMeshes)) this.drawnMeshes[name] = m
     return m
+  }
+
+  /**
+   * What a fixed mesh measures as drawn, in world cm along the practice wall's own axes (the
+   * axes are unit length, so a scale on the scene shows in these numbers): its width along
+   * the wall, its height, how high its bottom and centre sit above the practice floor, and how
+   * far its front is from the wall. Null for an unknown or empty mesh.
+   */
+  drawnSize(name: string): {widthCm: number; heightCm: number; bottomCm: number; centreCm: number; outCm: number} | null {
+    const m = this.drawnMeshes[name]
+    const e = m ? m.extent : null
+    if (!e) return null
+    const w = m.sceneObject.getTransform().getWorldTransform()
+    const pose = this.wallPose()
+    const right = pose.up.cross(pose.out).normalize()
+    const pts: vec3[] = []
+    for (const x of [e.min.x, e.max.x]) for (const y of [e.min.y, e.max.y]) for (const z of [e.min.z, e.max.z]) {
+      pts.push(w.multiplyPoint(new vec3(x, y, z)).sub(pose.origin))
+    }
+    const along = (axis: vec3) => {
+      let lo = Number.POSITIVE_INFINITY
+      let hi = Number.NEGATIVE_INFINITY
+      for (const p of pts) {
+        lo = Math.min(lo, p.dot(axis))
+        hi = Math.max(hi, p.dot(axis))
+      }
+      return {lo, hi}
+    }
+    const x = along(right)
+    const y = along(pose.up)
+    const z = along(pose.out)
+    return {widthCm: x.hi - x.lo, heightCm: y.hi - y.lo, bottomCm: y.lo, centreCm: (y.lo + y.hi) / 2, outCm: z.hi}
+  }
+
+  /** A track light as drawn: cm from the wall, above the practice floor and along the wall. */
+  drawnLight(i: number): {outCm: number; upCm: number; sideCm: number} {
+    const pose = this.wallPose()
+    const right = pose.up.cross(pose.out).normalize()
+    const p = this.fixtures[i].getTransform().getWorldPosition().sub(pose.origin)
+    return {outCm: p.dot(pose.out), upCm: p.dot(pose.up), sideCm: p.dot(right)}
+  }
+
+  /** The eye (camera) as drawn: cm above the practice floor, in world units. */
+  drawnEyeHeightCm(): number {
+    const pose = this.wallPose()
+    return this.cameraObject.getTransform().getWorldPosition().sub(pose.origin).dot(pose.up)
   }
 
   /** A light, low-opacity backing behind text that floats over the room. */
@@ -674,6 +992,7 @@ export class GlareZoneController extends BaseScriptComponent {
     this.overlapMesh.visual.setRenderOrder(FLOOR_RENDER.overlap)
     this.overlapMesh.sceneObject.getTransform().setLocalPosition(new vec3(0, 0.7, 0))
     this.statusLabel = this.floorLabel(this.floor, "Floor status label", OVERLAP_TEXT)
+    this.buildRings()
     this.viewingLabel = this.floorLabel(this.floor, "Viewing area label", new vec4(1, 1, 1, 0.95))
 
     // Overlays on the glass: amber light-limit cells, the glare spot and its labels.
@@ -772,6 +1091,15 @@ export class GlareZoneController extends BaseScriptComponent {
     this.menu = menuObj.createComponent(GlareHandMenu.getTypeName()) as GlareHandMenu
     this.menu.cameraObject = this.cameraObject
     this.menu.onRecall.add(() => this.recallPanels())
+    this.menu.onPlaceFront.add(() => this.placeInFront(LAYOUT.startDistanceCm))
+    this.menu.onPlaceWall.add(() => this.startWallPlacement())
+
+    // "Place on a wall": World Query hit tests along the aim ray; a pinch places the wall.
+    const placerObj = global.scene.createSceneObject("Wall placer")
+    this.placer = placerObj.createComponent(GlareWallPlacer.getTypeName()) as GlareWallPlacer
+    this.placer.cameraObject = this.cameraObject
+    this.placer.baseMaterial = this.baseMaterial
+    this.placer.onPlace.add((h: WallHit) => this.placeOnWallHit(h.position, h.normal))
 
     this.placeAnchor()
     this.applyPanelLayout()
@@ -909,7 +1237,8 @@ export class GlareZoneController extends BaseScriptComponent {
     place(this.answerCard, ay)
     place(this.controlsPanel, cy)
     place(this.morePanel, my)
-    this.legend.enabled = !results
+    this.legend.enabled = !results && this.moveOpen
+    this.sizeAnswerPlate()
     this.updateColumnGaps()
     this.layoutFloorLabels()
   }
@@ -967,6 +1296,9 @@ export class GlareZoneController extends BaseScriptComponent {
     const white = new vec4(1, 1, 1, 1)
     this.headline = this.cardTextAt(this.answerCard, "Headline", "", LAYOUT.headlineEm, white,
       HorizontalAlignment.Center, 0, HEADLINE_Y, W - 2, 700)
+    // Item D: the answer card is one line (the chosen eye height) plus the verdict for all three.
+    this.verdictLine = this.cardTextAt(this.answerCard, "Verdict", "", LAYOUT.headlineEm * 0.8, white,
+      HorizontalAlignment.Center, 0, VERDICT_Y, W - 2, 700)
     this.disclaimer = this.cardTextAt(this.answerCard, "Disclaimer", DISCLAIMER, LAYOUT.disclaimerEm,
       new vec4(1, 1, 1, 0.85), HorizontalAlignment.Center, 0, DISCLAIMER_Y, W - 2, 500)
     this.versionLabel = this.cardTextAt(this.answerCard, "Version", LENS_VERSION, LAYOUT.versionEm,
@@ -1003,12 +1335,25 @@ export class GlareZoneController extends BaseScriptComponent {
   private headlineFor(): string {
     const key = this.eyePreset
     const subject = key === "my"
-      ? `Your eyes (${Math.round(this.myEyeHeightCm)} cm)`
-      : EYES.filter((e) => e.key === key)[0].viewers
+      ? `${MY_EYES_LABEL} (${Math.round(this.myEyeHeightCm)} cm)`
+      : this.zoneName(key)
     const far = this.zoneFarEdgeCm(key)
+    if (this.zoneBad[key]) return `${subject}: glare cannot be computed, so not clear`
     return far > 0
-      ? `${subject} see glare up to ${G.oneDecimal(far)} cm from the wall`
-      : `${subject} see no glare from these lights`
+      ? `${subject}: glare up to ${G.cmAndFeet(far)} from the wall`
+      : `${subject}: no glare from these lights`
+  }
+
+  /**
+   * While a light moves: an eye height's zone end when the move began and now, from the same
+   * numbers as the zones ("Seated 73.5 to 56.4 cm").
+   */
+  private changeLine(key: ZoneKey): string {
+    const name = key === "my" ? MY_EYES_LABEL : this.zoneName(key)
+    const was = this.moveStartEnds[key]
+    const from = Number.isFinite(was) ? G.oneDecimal(was) : "?"
+    if (this.zoneBad[key]) return `${name} ${from} cm to cannot be computed`
+    return `${name} ${from} to ${G.oneDecimal(this.zoneFarEdgeCm(key))} cm`
   }
 
   /** One legend line, eye height and reach with units. */
@@ -1017,37 +1362,53 @@ export class GlareZoneController extends BaseScriptComponent {
     const who = key === "my"
       ? `My eyes, at ${Math.round(this.myEyeHeightCm)} cm`
       : `${this.zoneName(key)}, eyes at ${this.zoneHeight(key)} cm`
-    return far > 0 ? `${who}: glare up to ${G.oneDecimal(far)} cm from the wall` : `${who}: no glare`
+    if (this.zoneBad[key]) return `${who}: cannot be computed (read as glare)`
+    return far > 0 ? `${who}: glare up to ${G.cmAndFeet(far)} from the wall` : `${who}: no glare`
   }
 
   /** Bars and lines per eye height (the "My eyes" line only while that preset is chosen). */
   private rebuildLegend(): void {
-    const shown = this.eyePreset === "my" ? 4 : 3
-    const top = this.laneY(0) + LANE_H / 2 + 0.3
-    const bottom = this.laneY(shown - 1) - LANE_H / 2 - 0.3
-    this.legendWall.setQuads([rectXY(PLOT_X0 - 0.15, (top + bottom) / 2, 0.3, top - bottom, 0.12)], vec3.forward())
-    this.legendFooter.getTransform().setLocalPosition(new vec3(0, this.laneY(shown), 0))
-    const vx0 = this.plotX(this.viewingNearCm)
-    const vx1 = this.plotX(this.viewingFarCm)
-    this.legendViewing.setQuads([rectXY((vx0 + vx1) / 2, (top + bottom) / 2, vx1 - vx0, top - bottom, 0.05)], vec3.forward())
-    this.legendViewingLabel.text =
-      `Viewing area: ${Math.round(this.viewingNearCm)} to ${Math.round(this.viewingFarCm)} cm from the wall`
-    LANES.forEach((key, i) => {
-      const bar = this.legendBars[key]
+    // Item D: no floor map on the card (the floor shows the zones); the per-eye-height lines
+    // show only while a light moves, as each height's change (item B).
+    this.legendWall.setQuads([], vec3.forward())
+    this.legendViewing.setQuads([], vec3.forward())
+    this.legendFooter.enabled = false
+    this.legend.enabled = this.moveOpen && this.cardCount() === 0
+    LANES.forEach((key) => {
+      this.legendBars[key].setQuads([], vec3.forward())
       const label = this.legendLaneTexts[key]
       const show = key !== "my" || this.eyePreset === "my"
       label.getSceneObject().enabled = show
-      const rows = this.zoneRows[key] || []
-      if (!show || rows.length === 0) {
-        bar.setQuads([], vec3.forward())
-      } else {
-        const x0 = this.plotX(this.zoneNearEdgeCm(key))
-        const x1 = this.plotX(G.zoneFarEdge(rows))
-        bar.setQuads([rectXY((x0 + x1) / 2, this.laneY(i), Math.max(0.2, x1 - x0), LANE_H, 0.1)], vec3.forward())
-      }
-      if (show) label.text = this.laneLine(key)
+      if (show) label.text = this.moveOpen ? this.changeLine(key) : this.laneLine(key)
     })
     this.headline.text = this.headlineFor()
+    const clear = this.verdict() === "clear"
+    this.verdictLine.text = this.verdictText()
+    this.verdictLine.textFill.color = clear ? new vec4(1, 1, 1, 1) : OVERLAP_TEXT
+    this.sizeAnswerPlate()
+  }
+
+  /**
+   * The answer card's backing fits what it shows, its top edge fixed: the line, the verdict
+   * and the disclosure at rest; room for the change lines while a light moves; the full card
+   * for the results. The version label sits at its bottom right.
+   */
+  private sizeAnswerPlate(): void {
+    if (!this.answerPlate) return
+    const top = LAYOUT.answerHeight / 2
+    const H = this.cardCount() > 0 ? LAYOUT.answerHeight : this.moveOpen ? (this.eyePreset === "my" ? 15.5 : 13) : 8.5
+    if (Math.abs(this.answerPlate.size.y - H) > 1e-3) this.answerPlate.size = new vec2(LAYOUT.answerWidth, H)
+    this.answerBacking.getTransform().setLocalPosition(new vec3(0, top - H / 2, -0.3))
+    this.versionLabel.getSceneObject().getTransform().setLocalPosition(new vec3(LAYOUT.answerWidth / 2 - 0.7, top - H + 1.1, 0.15))
+  }
+
+  /** The verdict line on the answer card ("All three: clear", or the glare list). */
+  verdictLineText(): string {
+    return this.verdictLine.getSceneObject().isEnabledInHierarchy ? this.verdictLine.text : ""
+  }
+
+  verdictLineComponent(): Text {
+    return this.verdictLine
   }
 
   /** Put (or replace) a light's results card in the answer card, on that light's side. */
@@ -1147,18 +1508,16 @@ export class GlareZoneController extends BaseScriptComponent {
     this.ui.setEyeHeightName(this.presetName(this.eyePreset))
   }
 
-  /** Put the practice wall in front of the camera, with the floor at the chosen eye height. */
-  private placeGallery(): void {
-    const camT = this.cameraObject.getTransform()
-    const view = camT.getWorldRotation().multiplyVec3(new vec3(0, 0, -1))
-    let toUser = new vec3(-view.x, 0, -view.z)
-    toUser = toUser.length > 1e-4 ? toUser.normalize() : vec3.forward()
-    const yaw = Math.atan2(toUser.x, toUser.z)
-    const rot = quat.angleAxis(yaw, vec3.up())
-    const offset = rot.multiplyVec3(new vec3(0, this.eyeHeightCm, LAYOUT.startDistanceCm))
+  /**
+   * Put the practice wall's base point at (x, z) in world space, turned by yaw (upright: a
+   * yaw only), with the floor at the chosen eye height below the camera. The glare model
+   * works in the wall's own frame, so moving the wall changes no number.
+   */
+  private placeGalleryAt(x: number, z: number, yaw: number): void {
+    const cam = this.cameraObject.getTransform().getWorldPosition()
     const gt = this.gallery.getTransform()
-    gt.setWorldRotation(rot)
-    gt.setWorldPosition(camT.getWorldPosition().sub(offset))
+    gt.setWorldRotation(quat.angleAxis(yaw, vec3.up()))
+    gt.setWorldPosition(new vec3(x, cam.y - this.getEyeHeight(), z))
     this.placed = true
     this.recallPanels()
     this.applyPanelLayout()
@@ -1168,6 +1527,12 @@ export class GlareZoneController extends BaseScriptComponent {
   // ===================================================================== interaction
 
   private markAdjusted(): void {
+    if (!this.moveOpen) {
+      // The zone ends before this move (the zones are rebuilt after the change, next frame).
+      this.moveOpen = true
+      for (const k of LANES) this.moveStartEnds[k] = this.zoneBad[k] ? Number.NaN : this.zoneFarEdgeCm(k)
+      if (this.headline) this.rebuildLegend() // the change lines show from the first frame
+    }
     this.lastAdjustTime = getTime()
     this.dirty = true
   }
@@ -1207,6 +1572,7 @@ export class GlareZoneController extends BaseScriptComponent {
       this.rebuildLegend()
     }
     this.updateFollow(eye)
+    this.updateRings(eye)
     if (this.dirty) {
       this.dirty = false
       this.rebuildLights()
@@ -1215,6 +1581,7 @@ export class GlareZoneController extends BaseScriptComponent {
       this.rebuildAmber()
     }
     this.updateGlareSpot()
+    if (this.moveOpen && !this.isAdjusting()) this.closeMove()
     const alpha = this.isAdjusting() ? FULL_ALPHA : FAINT_ALPHA
     for (const e of EYES) {
       this.setAlpha(this.zoneMats[e.key], alpha)
@@ -1231,6 +1598,13 @@ export class GlareZoneController extends BaseScriptComponent {
   private rebuildLights(): void {
     for (let i = 0; i < this.lights.length; i++) {
       const l = this.lights[i]
+      const ok = G.lightComputable(l)
+      this.fixtures[i].enabled = ok
+      if (!ok) {
+        this.beamMeshes[i].setQuads([])
+        this.handleLines[i].setQuads([])
+        continue
+      }
       const p = G.lightPosition(l)
       this.fixtures[i].getTransform().setLocalPosition(new vec3(p.x, p.y, p.z))
       // Beam: a faint cone from the fixture to where it meets the wall plane.
@@ -1264,6 +1638,8 @@ export class GlareZoneController extends BaseScriptComponent {
   private rebuildZones(): void {
     for (const eye of EYES) this.rebuildZone(eye.key)
     this.rebuildZone("my")
+    // Again once every eye height is rebuilt: the status line's verdict reads all three.
+    this.rebuildOverlap()
     this.rebuildLegend()
   }
 
@@ -1274,7 +1650,11 @@ export class GlareZoneController extends BaseScriptComponent {
    */
   private rebuildZone(key: ZoneKey): void {
     const active = key !== "my" || this.eyePreset === "my"
-    const rows = active ? G.combinedZoneRows(this.lights, this.zoneHeight(key), ZONE_ROW_CM) : []
+    const h = this.zoneHeight(key)
+    const computable = this.lights.every((l) => G.lightComputable(l)) && Number.isFinite(h)
+    let rows = active && computable ? G.combinedZoneRows(this.lights, h, ZONE_ROW_CM) : []
+    this.zoneBad[key] = active && (!computable || !G.rowsComputable(rows))
+    if (this.zoneBad[key]) rows = []
     this.zoneRows[key] = rows
     const chosen = this.zoneFilled(key)
     const rects = chosen ? rows : G.zoneOutline(rows, ZONE_ROW_CM, OUTLINE_CM)
@@ -1295,10 +1675,10 @@ export class GlareZoneController extends BaseScriptComponent {
     const rows = this.zoneRows[key] || []
     this.overlapRowsNow = G.overlapRows(rows, this.viewingNearCm, this.viewingFarCm, LAYOUT.viewingHalfWidth)
     this.overlapMesh.setQuads(this.overlapRowsNow.map((r) => rectXZ(r.xMin, r.xMax, r.z0, r.z1, 0)))
-    const name = key === "my" ? MY_EYES_LABEL : this.zoneName(key)
-    const inside = this.overlapRowsNow.length > 0
-    this.statusLabel.text = inside ? `${name}: glare inside the viewing area` : `${name}: clear`
-    this.statusLabel.textFill.color = inside ? OVERLAP_TEXT : new vec4(1, 1, 1, 0.95)
+    // "All three: clear" only when every eye height is clear (G.verdictText).
+    const clear = this.verdict() === "clear"
+    this.statusLabel.text = this.verdictText()
+    this.statusLabel.textFill.color = clear ? new vec4(1, 1, 1, 0.95) : OVERLAP_TEXT
     this.statusLabel.getSceneObject().enabled = true
     this.layoutFloorLabels()
   }
@@ -1369,7 +1749,7 @@ export class GlareZoneController extends BaseScriptComponent {
       for (let x = -half; x < half - 1e-6; x += AMBER_CELL_CM) {
         for (let y = G.GLASS_BOTTOM_CM; y < G.GLASS_TOP_CM - 1e-6; y += AMBER_CELL_CM) {
           const c = {x: x + AMBER_CELL_CM / 2, y: y + AMBER_CELL_CM / 2, z: 0}
-          if (G.totalIlluminanceLux(this.lights, c) > G.WORKS_ON_PAPER_LUX) {
+          if (G.totalIlluminanceLux(this.lights.filter((l) => G.lightComputable(l)), c) > G.WORKS_ON_PAPER_LUX) {
             quads.push(rectXY(c.x, c.y, AMBER_CELL_CM, AMBER_CELL_CM, 1.0))
             centres.push({x: c.x, y: c.y})
           }
@@ -1393,7 +1773,7 @@ export class GlareZoneController extends BaseScriptComponent {
   private updateGlareSpot(): void {
     const e = this.eyeLocal()
     const eye = {x: e.x, y: e.y, z: e.z}
-    const byLight = this.lights.map((l) => G.glarePoint(eye, l))
+    const byLight = this.lights.map((l) => (G.lightComputable(l) ? G.glarePoint(eye, l) : null))
     const pts = byLight.filter((p) => p !== null) as G.V3[]
     const changed = pts.length !== this.glarePoints.length ||
       pts.some((p, i) => Math.abs(p.x - this.glarePoints[i].x) + Math.abs(p.y - this.glarePoints[i].y) > 0.05)

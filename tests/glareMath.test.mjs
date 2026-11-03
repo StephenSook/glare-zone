@@ -375,3 +375,78 @@ test("floor outline: one row is a closed box; a step between rows is closed by a
   assert.ok(stair.some((r) => r.z0 === 1.5 && r.xMin === -10.5 && r.xMax === -5.5), "strip over the step")
   assert.ok(!stair.some((r) => r.z0 === 1.5 && r.xMax > 0), "no strip where both rows reach")
 })
+
+test("answer card units: cm to one decimal, then feet and whole inches (1 in = 2.54 cm)", () => {
+  // Worked by hand: 62 / 2.54 = 24.41 in, so 24 in = 2 ft 0 in.
+  assert.equal(G.feetInches(62), "2 ft 0 in")
+  assert.equal(G.cmAndFeet(62), "62.0 cm (2 ft 0 in)")
+  // The three reaches at the standard placement (80.78 cm x 0.40, 0.91, 0.96):
+  // 32.31 cm = 12.72 in (13), 73.51 cm = 28.94 in (29), 77.55 cm = 30.53 in (31).
+  assert.equal(G.cmAndFeet(80.78 * 0.4), "32.3 cm (1 ft 1 in)")
+  assert.equal(G.cmAndFeet(80.78 * 0.91), "73.5 cm (2 ft 5 in)")
+  assert.equal(G.cmAndFeet(80.78 * 0.96), "77.5 cm (2 ft 7 in)")
+  // Rounding to the nearest inch carries into feet: 30.4 cm = 11.97 in reads 1 ft 0 in.
+  assert.equal(G.feetInches(30.4), "1 ft 0 in")
+  // Under a foot, inches only; 15.24 cm is exactly 6 in.
+  assert.equal(G.feetInches(10), "4 in")
+  assert.equal(G.feetInches(15.24), "6 in")
+  assert.equal(G.feetInches(0), "0 in")
+})
+
+test("overall verdict: clear only when every eye height stays out of the viewing area", () => {
+  const out = (key, endCm) => ({ key, endCm, insideCm: null })
+  // The standard placement in the 60 to 182 cm area: standing 32.31 stays out; seated 73.51
+  // and child 77.55 reach 13.51 and 17.55 cm into it.
+  const std = [out("standing", 32.31), { key: "seated", endCm: 73.51, insideCm: 13.51 }, { key: "child", endCm: 77.55, insideCm: 17.55 }]
+  assert.equal(G.overallVerdict(std), "glare")
+  assert.equal(G.overallVerdict([out("standing", 32.31), out("seated", 55), out("child", 58)]), "clear")
+  // One eye height inside is enough, even touching the edge (depth 0).
+  assert.equal(G.overallVerdict([out("standing", 10), out("seated", 20), { key: "child", endCm: 60, insideCm: 0 }]), "glare")
+  // A number that cannot be computed reads as glare, never clear; so does no data at all.
+  assert.equal(G.overallVerdict([out("standing", 10), out("seated", NaN), out("child", 20)]), "glare")
+  assert.equal(G.overallVerdict([out("standing", 10), out("seated", Infinity), out("child", 20)]), "glare")
+  assert.equal(G.overallVerdict([]), "glare")
+})
+
+test("inside depth: span of the overlap rows; null when the zone stays outside", () => {
+  // Seated zone at the standard placement reaches 73.51 cm; clipped to the area from 60 cm.
+  const rows = [{ z0: 58, z1: 60, xMin: -5, xMax: 5 }, { z0: 60, z1: 73.51, xMin: -5, xMax: 5 }]
+  assert.ok(Math.abs(G.insideDepth(G.overlapRows(rows, 60, 182, 100)) - 13.51) < 1e-9)
+  assert.equal(G.insideDepth(G.overlapRows([{ z0: 0, z1: 32.31, xMin: -5, xMax: 5 }], 60, 182, 100)), null)
+  // Outside the area's width: no overlap even though the depth reaches past 60 cm.
+  assert.equal(G.insideDepth(G.overlapRows([{ z0: 0, z1: 80, xMin: 120, xMax: 140 }], 60, 182, 100)), null)
+})
+
+test("session log line: one line, key=value, read back with the same rules", () => {
+  const eyes = [
+    { key: "standing", endCm: 32.312, insideCm: null },
+    { key: "seated", endCm: 73.507, insideCm: 13.507 },
+    { key: "child", endCm: NaN, insideCm: null },
+  ]
+  const line = G.moveLogLine(7, "R", 80.78, 32.35, 60, 182, eyes)
+  assert.equal(line, "GLARE_LOG seq=7 light=R distance_cm=80.78 tilt_deg=32.35 standing_end_cm=32.31 seated_end_cm=73.51 " +
+    "child_end_cm=nan viewing_near_cm=60.00 viewing_far_cm=182.00 standing_in_cm=- seated_in_cm=13.51 child_in_cm=- verdict=glare")
+  // A Logger export adds a prefix; the parser finds the tag anywhere in the line.
+  const f = G.parseLogLine("12:01:02 [Assets/Scripts/GlareZoneController.ts:600] " + line)
+  assert.equal(f.seq, "7")
+  assert.equal(f.seated_in_cm, "13.51")
+  assert.equal(f.verdict, "glare")
+  assert.equal(G.parseLogLine("Lens Opened: v0.4"), null)
+})
+
+test("verdict text: 'All three: clear' only when all three are clear; broken numbers read as glare", () => {
+  const names = { standing: "Standing", seated: "Seated", child: "Child seated" }
+  const out = (key, endCm) => ({ key, endCm, insideCm: null })
+  assert.equal(G.verdictText([out("standing", 24), out("seated", 54.6), out("child", 57.6)], names), "All three: clear")
+  // Standard placement: Standing alone is out of the area, but the answer is not clear.
+  const std = [out("standing", 32.31), { key: "seated", endCm: 73.51, insideCm: 13.51 }, { key: "child", endCm: 77.55, insideCm: 17.55 }]
+  assert.equal(G.verdictText(std, names), "Glare in the viewing area: Seated, Child seated")
+  assert.equal(G.verdictText([out("standing", NaN), out("seated", NaN), out("child", NaN)], names), "Glare (cannot be computed): all three")
+  assert.equal(G.verdictText([out("standing", 10), out("seated", NaN), { key: "child", endCm: 70, insideCm: 10 }], names),
+    "Glare in the viewing area: Child seated; cannot be computed: Seated")
+  // A light with a broken value cannot be computed; rows with a broken number cannot be used.
+  assert.equal(G.lightComputable({ xCm: 50, distanceCm: 80.78, tiltDeg: 32.35, dimmer: 1 }), true)
+  assert.equal(G.lightComputable({ xCm: 50, distanceCm: NaN, tiltDeg: 32.35, dimmer: 1 }), false)
+  assert.equal(G.rowsComputable([{ z0: 0, z1: 2, xMin: -5, xMax: 5 }]), true)
+  assert.equal(G.rowsComputable([{ z0: 0, z1: NaN, xMin: -5, xMax: 5 }]), false)
+})

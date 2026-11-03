@@ -22,8 +22,16 @@ import {GlareMediaArtStart} from "./GlareMediaArtStart"
 import {GlareMediaFilm04} from "./GlareMediaFilm04"
 import {GlareMediaFilm05} from "./GlareMediaFilm05"
 import {GlarePerfExerciser} from "./GlarePerfExerciser"
+import {GlarePerfExerciserLong} from "./GlarePerfExerciserLong"
 import {GlarePerfIdle} from "./GlarePerfIdle"
 import {GlarePerfExerciserNoOverlays} from "./GlarePerfExerciserNoOverlays"
+import {GlareC13WallPlacement} from "./GlareC13WallPlacement"
+import {GlareC14LogMatchesCard} from "./GlareC14LogMatchesCard"
+import {GlareC15ClearOnlyAllThree} from "./GlareC15ClearOnlyAllThree"
+import {GlareC16ChangeWhileMoving} from "./GlareC16ChangeWhileMoving"
+import {GlareC17FloorRingHold} from "./GlareC17FloorRingHold"
+import {GlareC18RealScale} from "./GlareC18RealScale"
+import {GlareC19IKReach} from "./GlareC19IKReach"
 
 @component
 export class LeafIndex extends BaseScriptComponent {
@@ -41,6 +49,13 @@ export class LeafIndex extends BaseScriptComponent {
     {id: "glare-c10-recall-panels", typename: GlareC10RecallPanels.getTypeName()},
     {id: "glare-c11-full-then-faint", typename: GlareC11FullThenFaint.getTypeName()},
     {id: "glare-c12-floor-overlap", typename: GlareC12FloorOverlap.getTypeName()},
+    {id: "glare-c13-wall-placement", typename: GlareC13WallPlacement.getTypeName()},
+    {id: "glare-c14-log-matches-card", typename: GlareC14LogMatchesCard.getTypeName()},
+    {id: "glare-c15-clear-only-all-three", typename: GlareC15ClearOnlyAllThree.getTypeName()},
+    {id: "glare-c16-change-while-moving", typename: GlareC16ChangeWhileMoving.getTypeName()},
+    {id: "glare-c17-floor-ring-hold", typename: GlareC17FloorRingHold.getTypeName()},
+    {id: "glare-c18-real-scale", typename: GlareC18RealScale.getTypeName()},
+    {id: "glare-c19-ik-reach", typename: GlareC19IKReach.getTypeName()},
     {id: "media-saved-sheet", typename: GlareMediaSavedSheet.getTypeName()}, // media helper, not a test
     {id: "media-more-open", typename: GlareMediaMoreOpen.getTypeName()}, // media helper, not a test
     {id: "media-seated", typename: GlareMediaSeated.getTypeName()}, // media helper, not a test
@@ -53,5 +68,6 @@ export class LeafIndex extends BaseScriptComponent {
     {id: "perf-exerciser", typename: GlarePerfExerciser.getTypeName()}, // perf helper, not a test
     {id: "perf-idle", typename: GlarePerfIdle.getTypeName()}, // perf helper, not a test
     {id: "perf-exerciser-no-overlays", typename: GlarePerfExerciserNoOverlays.getTypeName()}, // perf A/B helper
+    {id: "perf-exerciser-long", typename: GlarePerfExerciserLong.getTypeName()}, // perf helper (36 s of drags)
   ]
 }
