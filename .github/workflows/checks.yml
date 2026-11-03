@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   unit-tests:
-    name: Glare math unit tests (node --test)
+    name: Unit tests (node --test)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -17,7 +17,7 @@ jobs:
         with:
           node-version: "24"
       - name: Run unit tests
-        run: node --test tests/glareMath.test.mjs
+        run: node --test tests/glareMath.test.mjs tests/placement.test.mjs
 
   repo-checks:
     name: Repo checks (LEAF count, README claims, hygiene)
