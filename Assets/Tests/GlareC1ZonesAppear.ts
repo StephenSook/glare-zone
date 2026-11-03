@@ -49,7 +49,7 @@ export class GlareC1ZonesAppear extends Scenario {
     // all three; the disclosure is the small third line.
     expect(c.headlineText(), "the one line").toBe("Standing: glare up to 32.3 cm (1 ft 1 in) from the wall")
     expect(c.verdictLineText(), "the verdict").toBe("Glare in the viewing area: Seated, Child seated")
-    expect(c.disclaimerText(), "disclosure").toBe("Computed reflection, sample lamp values, not measured")
+    expect(c.disclaimerText(), "disclosure").toBe("Computed for flat glass in this room; manufacturer lamp data, not measured")
     expect(c.versionText(), "version shown").toBe("v0.4")
     // The unexplained "You" marker is gone from the map. Positive control: the same lookup
     // finds a map label that does exist.

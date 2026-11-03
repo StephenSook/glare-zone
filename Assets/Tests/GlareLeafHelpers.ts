@@ -1,5 +1,8 @@
 // Shared helpers for the Glare Zone LEAF scenarios.
-import {findSceneObjectByName, sleep} from "Leaf.lspkg/Utils/common/Utils"
+import {awaitEventOnce, findSceneObjectByName, nextFrame, sleep} from "Leaf.lspkg/Utils/common/Utils"
+import {DefaultLeafInteractor} from "Leaf.lspkg/Interactors/interactor/DefaultLeafInteractor"
+import {InteractionManager} from "SpectaclesInteractionKit.lspkg/Core/InteractionManager/InteractionManager"
+import {InteractorInputType} from "SpectaclesInteractionKit.lspkg/Core/Interactor/Interactor"
 import {findInteractablesByName} from "Leaf.lspkg/Interactors/InteractableUtils"
 import {Interactable} from "SpectaclesInteractionKit.lspkg/Components/Interaction/Interactable/Interactable"
 import {GlareZoneController} from "../Scripts/GlareZoneController"
@@ -116,17 +119,114 @@ export function dragFlag(i: Interactable): () => boolean {
 }
 
 /**
+ * Test-only bridge for LEAF's IK arm pressing within arm reach (B4, BUILD_LOG row 24).
+ *
+ * Within arm reach, LEAF's IK hand presses by SIK's physical proximity: it replaces
+ * `getPokeStartPoint` / `getPokeEndPoint` on the hand interactor's PhysicalInteractionProvider
+ * so SIK's poke spherecast follows the IK finger. This project's SIK (package 2.0.0, runtime
+ * 0.18.0) binds those two methods once, in the provider's constructor
+ * (`cachedGetPokeEndPoint = frameCache.wrapMethod(..., this.getPokeEndPoint)`, which calls
+ * `fn.bind(this)`), and only ever calls the bound copies, so LEAF's replacements are never
+ * used: no press within reach can hover (convergence_timeout on hoverEnter), for any
+ * Interactable, whatever its targeting mode. Leaf 2.0.2 is the newest LEAF this SIK takes
+ * (Leaf 4.0.0 imports a newer SIK, BUILD_LOG row 2).
+ *
+ * This points the provider's bound copies at LEAF's replacements, so SIK's own provider runs
+ * on the IK finger as LEAF intends; the press still goes through SIK's proximity detection and
+ * the Interactable's own events. It changes nothing in the Lens. Call it after
+ * createIKInteractor(); it returns a function that restores SIK's bound copies.
+ */
+export function bridgeLeafDirectPoke(hand: "left" | "right"): () => void {
+  const type = hand === "left" ? InteractorInputType.LeftHand : InteractorInputType.RightHand
+  const interactor = InteractionManager.getInstance().getInteractorsByType(type)[0] as unknown as
+    {[k: string]: any} | undefined
+  const provider = interactor ? interactor["physicalInteractionProvider"] : undefined
+  if (!provider || !Object.prototype.hasOwnProperty.call(provider, "getPokeEndPoint")) {
+    throw new Error(`bridgeLeafDirectPoke: LEAF's IK poke override not found on the ${hand} hand (create the IK interactor first)`)
+  }
+  const saved = {start: provider["cachedGetPokeStartPoint"], end: provider["cachedGetPokeEndPoint"]}
+  provider["cachedGetPokeStartPoint"] = () => provider.getPokeStartPoint()
+  provider["cachedGetPokeEndPoint"] = () => provider.getPokeEndPoint()
+  return () => {
+    provider["cachedGetPokeStartPoint"] = saved.start
+    provider["cachedGetPokeEndPoint"] = saved.end
+  }
+}
+
+/**
+ * A held drag in fixed steps (B2). LEAF's drag() moves its target by the drag vector once per
+ * frame for a time, so how far the knob travels, and where the samples land, depends on the
+ * frame rate. This drives the same SIK interactor path (hover, select, drag vector), but each
+ * step delivers exactly one drag update of `step` and then holds still (zero drag vector) for
+ * `settleFrames` frames before `atStep(k)` reads the Lens: every sample is taken at a known
+ * knob position, while the knob is still held. Returns how many steps were delivered.
+ */
+export class SteppedDragInteractor extends DefaultLeafInteractor {
+  async stepDrag(target: Interactable, step: vec3, steps: number, atStep: (k: number) => void,
+    settleFrames: number = 3): Promise<number> {
+    const still = vec3.zero()
+    let delivered = 0
+    const unsubscribe = target.onDragUpdate.add(() => {
+      const v = this.overrideDragVector
+      if (v && v.length > 0) {
+        delivered++
+        this.startPoint = this.startPoint.add(step)
+        this.endPoint = this.endPoint.add(step)
+        this.overrideDragVector = still // one update per step
+      }
+    })
+    const dragStarted = awaitEventOnce(target.onDragStart)
+    const dragEnded = awaitEventOnce(target.onDragEnd)
+    await this.enterHover(target)
+    await nextFrame()
+    await nextFrame()
+    this.startSelecting()
+    await nextFrame()
+    this.overrideDragVector = still
+    await dragStarted
+    try {
+      for (let k = 1; k <= steps; k++) {
+        const before = delivered
+        this.overrideDragVector = step
+        for (let f = 0; f < 30 && delivered === before; f++) await nextFrame()
+        if (delivered === before) throw new Error(`stepDrag: step ${k} was not delivered`)
+        for (let f = 0; f < settleFrames; f++) await nextFrame()
+        atStep(k)
+      }
+    } finally {
+      unsubscribe()
+      this.stopSelecting()
+      await dragEnded
+      this.resetStartEndPoint()
+      this.overrideDragVector = undefined
+      await this.exitHover()
+    }
+    return delivered
+  }
+}
+
+/**
+ * The fixture's published photometry, copied by hand from the TSLight RXT series
+ * specification sheet (CBCP table, page 2, RXT13 at 3000K, CRI 83), not from GlareMath:
+ * full beam angle and centre-beam candlepower per reflector. Manufacturer data, not measured.
+ */
+export const SHEET_RXT13 = {
+  wide: {beamDeg: 40, candela: 2700}, // the 40 deg reflector (the Lens's default)
+  narrow: {beamDeg: 20, candela: 5000}, // the 20 deg reflector
+}
+
+/**
  * Independent of GlareMath: the highest point of the glazing (x -50..50, y 100..200 cm) inside
  * a light's beam, found by testing points against the cone directly. The light hangs at
  * (x, 300, D), pans to the print's centre line and tilts tiltDeg from straight down, so its
- * axis points at (0, 300 - sqrt(x^2 + D^2) / tan(tilt), 0); the sample beam is 25 deg wide.
- * Returns null when no glazing point is lit.
+ * axis points at (0, 300 - sqrt(x^2 + D^2) / tan(tilt), 0); the beam is beamDeg wide (the
+ * RXT13's 40 deg reflector unless given). Returns null when no glazing point is lit.
  */
-export function coneLitTopCm(xL: number, D: number, tiltDeg: number): number | null {
+export function coneLitTopCm(xL: number, D: number, tiltDeg: number, beamDeg: number = SHEET_RXT13.wide.beamDeg): number | null {
   const horiz = Math.sqrt(xL * xL + D * D)
   const aimY = 300 - horiz / Math.tan((tiltDeg * Math.PI) / 180)
   const ax = new vec3(-xL, aimY - 300, -D).normalize()
-  const cosHalf = Math.cos((12.5 * Math.PI) / 180)
+  const cosHalf = Math.cos(((beamDeg / 2) * Math.PI) / 180)
   const lit = (x: number, y: number) => new vec3(x - xL, y - 300, -D).normalize().dot(ax) >= cosHalf
   let best: number | null = null
   for (let x = -50; x <= 50; x += 0.5) {
@@ -150,21 +250,25 @@ export function coneLitTopCm(xL: number, D: number, tiltDeg: number): number | n
 }
 
 /**
- * Independent of GlareMath: lux on the glass at (x, y) from the brief's sample fixture
- * ("25 degree beam, 1,500 cd at full"): inside a light's cone, E = I x cos(incidence) / d^2,
- * d in metres, cos = D / d for glass facing the room. Lights as {xCm, distanceCm, tiltDeg, dimmer}.
+ * Independent of GlareMath: lux on the glass at (x, y) from the RXT13's published photometry
+ * (SHEET_RXT13; a light's own beamDeg and candela, else the 40 deg reflector's): inside a
+ * light's cone, E = I x cos(incidence) / d^2, d in metres, cos = D / d for glass facing the
+ * room. Lights as {xCm, distanceCm, tiltDeg, dimmer, beamDeg?, candela?}.
  */
-export function handLux(lights: {xCm: number; distanceCm: number; tiltDeg: number; dimmer: number}[], x: number, y: number): number {
+export function handLux(lights: {xCm: number; distanceCm: number; tiltDeg: number; dimmer: number;
+  beamDeg?: number; candela?: number}[], x: number, y: number): number {
   let sum = 0
   for (const l of lights) {
+    const beamDeg = l.beamDeg ?? SHEET_RXT13.wide.beamDeg
+    const candela = l.candela ?? SHEET_RXT13.wide.candela
     const horiz = Math.sqrt(l.xCm * l.xCm + l.distanceCm * l.distanceCm)
     const aimY = 300 - horiz / Math.tan((l.tiltDeg * Math.PI) / 180)
     const axis = new vec3(-l.xCm, aimY - 300, -l.distanceCm).normalize()
     const v = new vec3(x - l.xCm, y - 300, -l.distanceCm)
     const d = v.length
-    if (v.normalize().dot(axis) < Math.cos((12.5 * Math.PI) / 180)) continue
+    if (v.normalize().dot(axis) < Math.cos(((beamDeg / 2) * Math.PI) / 180)) continue
     const cos = l.distanceCm / d
-    sum += (1500 * l.dimmer * cos) / ((d / 100) * (d / 100))
+    sum += (candela * l.dimmer * cos) / ((d / 100) * (d / 100))
   }
   return sum
 }

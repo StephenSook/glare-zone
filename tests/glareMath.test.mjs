@@ -187,10 +187,11 @@ test("tilt from vertical, by hand: a light 50 cm off the centre line and 80.78 c
 })
 
 test("8 (Lens path). a partly lit glass: the beam's top edge at 180 cm gives seated 47.79 cm", () => {
-  // Light on the centre line, 80.78 cm out, 300 cm up. Its beam's top edge (12.5 deg above
-  // the axis) should meet the wall at 180: atan(80.78 / 120) = 33.95 deg from vertical, so
-  // the axis tilt is 33.95 - 12.5 = 21.45 deg. Then Y = 180 and seated reach = 0.5917 x 80.78.
-  const tilt = (Math.atan(80.78 / 120) * 180) / Math.PI - 12.5
+  // Light on the centre line, 80.78 cm out, 300 cm up, with the default RXT13 40 deg reflector.
+  // Its beam's top edge (20 deg above the axis) should meet the wall at 180: atan(80.78 / 120)
+  // = 33.95 deg from vertical, so the axis tilt is 33.95 - 20 = 13.95 deg. Then Y = 180 and
+  // seated reach = 80.78 x (180 - 109) / (300 - 180) = 0.5917 x 80.78 = 47.79.
+  const tilt = (Math.atan(80.78 / 120) * 180) / Math.PI - G.DEFAULT_FIXTURE.beamDeg / 2
   const light = { xCm: 0, distanceCm: 80.78, tiltDeg: tilt, dimmer: 1 }
   const span = G.litGlassSpan(light)
   assert.ok(span, "beam lights the glass")
@@ -333,15 +334,37 @@ test("scene model: glare point appears inside the seated zone and not outside it
   assert.equal(G.glarePoint(eyeOut, light), null)
 })
 
-test("scene model: sample light level at the print centre and the 50 lux check", () => {
+test("scene model: light level at the print centre (RXT13, 40 deg, 2,700 cd) and the 50 lux check", () => {
   const lights = [sceneLight(50, D0), sceneLight(-50, D0)]
   const centre = { x: 0, y: 150, z: 0 }
   const lux = G.totalIlluminanceLux(lights, centre)
-  // 1500 cd x cos(incidence) / d^2 per light: d = 1.776 m, cos = 0.455 -> about 216 lux each.
-  near(lux, 432, 2, "two lights at full")
+  // Per light: d = sqrt(50^2 + 150^2 + 80.78^2) = 177.55 cm = 1.7755 m, cos = 80.78 / 177.55 =
+  // 0.4550, so 2,700 cd x 0.4550 / 1.7755^2 = 389.7 lux; two lights 779.4 lux.
+  near(lux, 779.4, 1, "two lights at full")
   assert.ok(lux > G.WORKS_ON_PAPER_LUX)
-  const dimmed = lights.map((l) => ({ ...l, dimmer: 0.1 }))
-  assert.ok(G.totalIlluminanceLux(dimmed, centre) < G.WORKS_ON_PAPER_LUX)
+  // 10%: 77.9 lux, still over the 50 lux limit; 5%: 39.0 lux, under it.
+  near(G.totalIlluminanceLux(lights.map((l) => ({ ...l, dimmer: 0.1 })), centre), 77.94, 0.1, "at 10%")
+  near(G.totalIlluminanceLux(lights.map((l) => ({ ...l, dimmer: 0.05 })), centre), 38.97, 0.1, "at 5%")
+  assert.ok(G.totalIlluminanceLux(lights.map((l) => ({ ...l, dimmer: 0.05 })), centre) < G.WORKS_ON_PAPER_LUX)
+})
+
+test("RXT13 photometry: the sheet's footcandle table agrees with E = I / d^2 (on the beam axis)", () => {
+  // Manufacturer data (RXT series specification sheet, p. 2 CBCP and p. 3 footcandles, RXT13):
+  // 20 deg 5,000 cd gives 200 fc at 5 ft; 40 deg 2,700 cd gives 108 fc at 5 ft (1 fc = 10.764 lux).
+  assert.equal(G.RXT13_40.candela, 2700)
+  assert.equal(G.RXT13_40.beamDeg, 40)
+  assert.equal(G.RXT13_20.candela, 5000)
+  assert.equal(G.RXT13_20.beamDeg, 20)
+  assert.equal(G.DEFAULT_FIXTURE, G.RXT13_40)
+  // A light 5 ft (152.4 cm) out at ceiling height, aimed straight at the wall (tilt 89.5, the
+  // model's steepest), so its axis meets the glass plane square on near ceiling height: the
+  // point on the axis 5 ft away gets I / d^2 at normal incidence.
+  for (const [f, fc] of [[G.RXT13_20, 200], [G.RXT13_40, 108]]) {
+    const light = { xCm: 0, distanceCm: 152.4, tiltDeg: 89.5, dimmer: 1, beamDeg: f.beamDeg, candela: f.candela }
+    const aim = G.aimPoint(light)
+    const lux = G.illuminanceLux(light, { x: 0, y: aim.y, z: 0 }, { ...G.DEFAULT_ROOM, glassTopCm: 400 })
+    near(lux / 10.764, fc, fc * 0.01, `${f.reflector}: ${(lux / 10.764).toFixed(1)} fc at 5 ft vs the sheet's ${fc}`)
+  }
 })
 
 // Floor view (row 8): the part of the selected zone inside the viewing area, and the faint
@@ -449,4 +472,308 @@ test("verdict text: 'All three: clear' only when all three are clear; broken num
   assert.equal(G.lightComputable({ xCm: 50, distanceCm: NaN, tiltDeg: 32.35, dimmer: 1 }), false)
   assert.equal(G.rowsComputable([{ z0: 0, z1: 2, xMin: -5, xMax: 5 }]), true)
   assert.equal(G.rowsComputable([{ z0: 0, z1: NaN, xMin: -5, xMax: 5 }]), false)
+})
+
+// B1 (drag script time): combinedZoneRows and zoneOutline were rewritten to allocate less,
+// and litGlassSpan keeps its last few answers. The versions before B1 are kept here as the
+// reference; the new ones must give the same rows, in the same order, for every placement.
+
+function refCombinedZoneRows(lights, h, stepCm = 2) {
+  const byRow = {}
+  for (const light of lights) {
+    for (const r of G.zoneRows(light, h, stepCm)) {
+      const key = Math.floor(r.z0 / stepCm).toString()
+      if (!byRow[key]) byRow[key] = []
+      byRow[key].push(r)
+    }
+  }
+  const out = []
+  for (const key of Object.keys(byRow)) {
+    const rows = byRow[key].slice().sort((a, b) => a.xMin - b.xMin)
+    let cur = { ...rows[0] }
+    for (let i = 1; i < rows.length; i++) {
+      const r = rows[i]
+      if (r.xMin <= cur.xMax) {
+        cur.xMax = Math.max(cur.xMax, r.xMax)
+        cur.z0 = Math.min(cur.z0, r.z0)
+        cur.z1 = Math.max(cur.z1, r.z1)
+      } else {
+        out.push(cur)
+        cur = { ...r }
+      }
+    }
+    out.push(cur)
+  }
+  out.sort((a, b) => a.z0 - b.z0 || a.xMin - b.xMin)
+  return out
+}
+
+function refSubtract(a, b) {
+  let out = a.map((i) => ({ min: i.min, max: i.max }))
+  for (const s of b) {
+    const next = []
+    for (const i of out) {
+      if (s.max <= i.min || s.min >= i.max) {
+        next.push(i)
+        continue
+      }
+      if (s.min > i.min) next.push({ min: i.min, max: s.min })
+      if (s.max < i.max) next.push({ min: s.max, max: i.max })
+    }
+    out = next
+  }
+  return out
+}
+
+function refZoneOutline(rows, stepCm, thicknessCm) {
+  const h = thicknessCm / 2
+  const slabs = {}
+  const keys = []
+  for (const r of rows) {
+    const k = Math.floor(r.z0 / stepCm + 1e-9)
+    if (!slabs[k]) {
+      slabs[k] = []
+      keys.push(k)
+    }
+    slabs[k].push(r)
+  }
+  keys.sort((a, b) => a - b)
+  const out = []
+  for (const r of rows) {
+    out.push({ z0: r.z0, z1: r.z1, xMin: r.xMin - h, xMax: r.xMin + h })
+    out.push({ z0: r.z0, z1: r.z1, xMin: r.xMax - h, xMax: r.xMax + h })
+  }
+  const cover = (rs) => rs.map((r) => ({ min: r.xMin, max: r.xMax })).sort((a, b) => a.min - b.min)
+  const strip = (iv, z) => out.push({ z0: z - h, z1: z + h, xMin: iv.min - h, xMax: iv.max + h })
+  for (let i = 0; i <= keys.length; i++) {
+    const prev = i > 0 ? slabs[keys[i - 1]] : []
+    const next = i < keys.length ? slabs[keys[i]] : []
+    const adjacent = i > 0 && i < keys.length && keys[i] === keys[i - 1] + 1
+    const prevTop = prev.reduce((m, r) => Math.max(m, r.z1), -Infinity)
+    const nextBottom = next.reduce((m, r) => Math.min(m, r.z0), Infinity)
+    if (adjacent) {
+      for (const iv of refSubtract(cover(prev), cover(next))) strip(iv, prevTop)
+      for (const iv of refSubtract(cover(next), cover(prev))) strip(iv, nextBottom)
+    } else {
+      for (const iv of cover(prev)) strip(iv, prevTop)
+      for (const iv of cover(next)) strip(iv, nextBottom)
+    }
+  }
+  return out
+}
+
+test("B1: merged zone rows and outlines match the versions before B1 for 720 placements", () => {
+  let cases = 0
+  let rowsSeen = 0
+  for (const D of [30, 45, 62, 80.78, 100, 150]) {
+    for (const tilt of [5, 20, 32.35, 45, 60, 80]) {
+      for (const xs of [[-50, 50], [-70, 30], [0], [-120, 90]]) {
+        for (const h of [104, 109, 130, 160, 190]) {
+          const lights = xs.map((x) => ({ xCm: x, distanceCm: D, tiltDeg: tilt, dimmer: 1 }))
+          const ref = refCombinedZoneRows(lights, h, 2)
+          const now = G.combinedZoneRows(lights, h, 2)
+          assert.deepStrictEqual(now, ref, `rows D ${D} tilt ${tilt} x ${xs} h ${h}`)
+          for (const t of [1, 1.5]) {
+            assert.deepStrictEqual(G.zoneOutline(now, 2, t), refZoneOutline(ref, 2, t), `outline D ${D} tilt ${tilt} x ${xs} h ${h}`)
+          }
+          rowsSeen += ref.length
+          cases++
+        }
+      }
+    }
+  }
+  assert.equal(cases, 720)
+  assert.ok(rowsSeen > 5000, `the placements make real zones (${rowsSeen} rows; 7798 when written)`)
+  // Rows the lights never make: two pieces in one slab, gaps between slabs, a clipped row.
+  const odd = [
+    { z0: 0, z1: 2, xMin: -30, xMax: -10 }, { z0: 0, z1: 2, xMin: 5, xMax: 20 },
+    { z0: 2, z1: 4, xMin: -25, xMax: 15 },
+    { z0: 8, z1: 10, xMin: -5, xMax: 5 },
+    { z0: 10.4, z1: 12, xMin: -40, xMax: -20 }, { z0: 10, z1: 12, xMin: 0, xMax: 30 },
+  ]
+  assert.deepStrictEqual(G.zoneOutline(odd, 2, 1.5), refZoneOutline(odd, 2, 1.5))
+  assert.deepStrictEqual(G.zoneOutline([], 2, 1.5), [])
+})
+
+test("B1: the lit-span cache answers by every input and cannot be changed from outside", () => {
+  const base = { xCm: 50, distanceCm: 80.78, tiltDeg: 32.35, dimmer: 1 }
+  const first = G.litGlassSpan(base)
+  near(first.max, 200, 1e-6, "beam top at the glass top at the standard placement")
+  // Each input changes the answer right after the base was cached (a key missing one would
+  // return the base's span). Values checked in node: top 198.62, 171.73, 168.38; room
+  // variants give min 110.56 (10 deg beam), max 188.19 (280 cm ceiling), 190, min 120.
+  // Values checked in node with the RXT13 40 deg default: top 194.89 (tilt 20), 187.29
+  // (140 cm out), 166.50 (200 cm along the track), 199.29 (its own 20 deg reflector); room
+  // variants give min 110.56 (10 deg beam), max 190, min 120.
+  const changed = [
+    [{ ...base, tiltDeg: 20 }, undefined, "tilt"],
+    [{ ...base, distanceCm: 140 }, undefined, "distance"],
+    [{ ...base, xCm: 200 }, undefined, "position along the track"],
+    [{ ...base, beamDeg: 20 }, undefined, "the light's own reflector"],
+    [base, { ...G.DEFAULT_ROOM, beamDeg: 10 }, "room beam angle"],
+    [base, { ...G.DEFAULT_ROOM, glassTopCm: 190 }, "glass top"],
+    [base, { ...G.DEFAULT_ROOM, glassBottomCm: 120 }, "glass bottom"],
+  ]
+  for (const [light, room, what] of changed) {
+    G.litGlassSpan(base)
+    assert.notDeepStrictEqual(G.litGlassSpan(light, room), first, what)
+  }
+  // The ceiling and the glass width can leave this span unchanged, but they are still keyed.
+  assert.notEqual(G.litGlassSpanKey(base, { ...G.DEFAULT_ROOM, glassHalfWidthCm: 10 }), G.litGlassSpanKey(base))
+  assert.notEqual(G.litGlassSpanKey(base, { ...G.DEFAULT_ROOM, ceilingCm: 280 }), G.litGlassSpanKey(base))
+  // The dimmer does not move the lit span, and the cache treats it as the same light.
+  assert.deepStrictEqual(G.litGlassSpan({ ...base, dimmer: 0.1 }), first)
+  // Changing a returned span does not change the next answer.
+  const got = G.litGlassSpan(base)
+  got.max = -1
+  assert.deepStrictEqual(G.litGlassSpan(base), first)
+  // More placements than the cache holds, then the first again: still the same answer.
+  for (let d = 30; d < 60; d += 1) G.litGlassSpan({ ...base, distanceCm: d })
+  assert.deepStrictEqual(G.litGlassSpan(base), first)
+})
+
+// B5: suggest a setback. Hand values: with the whole glass lit (top Y = 200 cm) a light D cm
+// out reaches D x (200 - h) / (300 - 200): 0.40 D standing, 0.91 D seated, 0.96 D child seated.
+// Child seated binds, and a zone reaching exactly the near edge counts as inside, so the
+// farthest clear setback is just under nearEdge / 0.96.
+
+function standardLights(D = 80.78) {
+  // Aimed at the print centre (150 cm) from D: at 80.78 cm, tilt atan(sqrt(50^2 + 80.78^2) / 150) = 32.35 deg.
+  const tilt = G.tiltForAim(50, D, 150)
+  return [{ xCm: -50, distanceCm: D, tiltDeg: tilt, dimmer: 1 }, { xCm: 50, distanceCm: D, tiltDeg: tilt, dimmer: 1 }]
+}
+
+const verdictAt = (lights, D, near = 60) =>
+  G.overallVerdict(G.eyeResultsFor(lights.map((l) => ({ ...l, distanceCm: D })), G.VERDICT_HEIGHTS, near, 182, 100))
+
+test("B5: eye results for the standard placement match the card's hand values", () => {
+  near(G.tiltForAim(50, 80.78, 150), 32.35, 0.01, "rest tilt")
+  const r = G.eyeResultsFor(standardLights(), G.VERDICT_HEIGHTS, 60, 182, 100)
+  near(r[0].endCm, 32.31, 0.01, "standing end")
+  assert.equal(r[0].insideCm, null, "standing outside the area")
+  near(r[1].endCm, 73.51, 0.01, "seated end")
+  near(r[1].insideCm, 13.51, 0.01, "seated inside")
+  near(r[2].endCm, 77.55, 0.01, "child end")
+  near(r[2].insideCm, 17.55, 0.01, "child inside")
+  assert.equal(G.overallVerdict(r), "glare")
+})
+
+test("B5: suggested setback at the standard placement is just under 60 / 0.96 = 62.5 cm", () => {
+  const s = G.suggestSetbackCm(standardLights())
+  near(s, 62.5, G.SETBACK_TOL_CM + 1e-6, "setback")
+  assert.equal(verdictAt(standardLights(), s), "clear", "clear at the suggestion")
+  assert.equal(verdictAt(standardLights(), s + 0.02), "glare", "glare just past it")
+  // The lights themselves are not moved.
+  assert.equal(standardLights()[0].distanceCm, 80.78)
+  assert.equal(G.setbackLabel(s), "All three clear at 62.4 cm")
+})
+
+test("B5: lights at 100 cm with the viewing area from 80 cm: setback 80 / 0.96 = 83.33 cm", () => {
+  // Lights 100 cm out, aimed at the print centre (tilt atan(111.80 / 150) = 36.70 deg): the whole glass is lit, so
+  // child seated reaches 0.96 x 100 = 96 cm, inside an area from 80 cm. (The standard placement's
+  // 77.55 cm would already be clear there, so it returns its own 80.78: checked first.)
+  assert.equal(G.suggestSetbackCm(standardLights(), 80), 80.78)
+  const at100 = standardLights(100)
+  near(at100[0].tiltDeg, 36.70, 0.01, "tilt aimed at 150 from 100 cm")
+  assert.equal(verdictAt(at100, 100, 80), "glare")
+  const s = G.suggestSetbackCm(at100, 80)
+  near(s, 83.333, G.SETBACK_TOL_CM + 1e-3, "setback")
+  assert.equal(verdictAt(at100, s, 80), "clear")
+  assert.equal(verdictAt(at100, s + 0.02, 80), "glare")
+  assert.equal(G.setbackLabel(s), "All three clear at 83.3 cm")
+})
+
+test("B5: already clear gives where the lights are; nowhere clear gives none; only toward the wall", () => {
+  // Tilted to 80 deg the beams miss the glass (unit case 9): already clear, no move needed.
+  const missing = standardLights().map((l) => ({ ...l, tiltDeg: 80 }))
+  assert.equal(G.suggestSetbackCm(missing), 80.78)
+  // The search starts from the farthest light: one at 70 and one at 80.78 still gives 62.5.
+  const mixed = standardLights()
+  mixed[0] = { ...mixed[0], distanceCm: 70 }
+  near(G.suggestSetbackCm(mixed), 62.5, G.SETBACK_TOL_CM + 1e-6, "mixed distances")
+  // Far out with the tilt kept, the beam drops down the glass: with the 20 deg reflector at
+  // 150 cm it lights only the lower glass and reads clear, but the search never goes there.
+  const narrow = standardLights().map((l) => ({ ...l, beamDeg: 20, candela: 5000 }))
+  assert.equal(verdictAt(narrow, 150), "clear", "150 cm with the 20 deg reflector is clear (lower glass only)")
+  assert.equal(verdictAt(narrow, 80.78), "glare", "80.78 cm with the 20 deg reflector is glare")
+  assert.ok(G.suggestSetbackCm(narrow) < 80.78, "suggestion is toward the wall")
+  assert.ok(G.suggestSetbackCm(standardLights()) < 80.78, "suggestion is toward the wall")
+  // A viewing area from 20 cm: even at 30 cm child seated reaches 0.96 x 30 = 28.8 cm.
+  assert.equal(G.suggestSetbackCm(standardLights(), 20), null)
+  // A light that cannot be computed: no suggestion.
+  assert.equal(G.suggestSetbackCm([{ xCm: 50, distanceCm: 80, tiltDeg: Number.NaN, dimmer: 1 }]), null)
+  assert.equal(G.setbackLabel(150), "All three clear at 150.0 cm")
+})
+
+test("B5: the search finds the same setback as a 0.1 cm scan inward from the lights (54 placements)", () => {
+  let found = 0
+  for (const tilt of [20, 32.35, 45]) {
+    for (const xs of [[-50, 50], [-70, 30], [0]]) {
+      for (const nearEdge of [40, 60, 90]) {
+       for (const start of [80, 120]) {
+        const lights = xs.map((x) => ({ xCm: x, distanceCm: start, tiltDeg: tilt, dimmer: 1 }))
+        let scan = null
+        for (let D = start; D >= G.TRACK_MIN_CM - 1e-9; D -= 0.1) {
+          if (verdictAt(lights, D, nearEdge) === "clear") {
+            scan = D
+            break
+          }
+        }
+        const s = G.suggestSetbackCm(lights, nearEdge)
+        const label = `tilt ${tilt} x ${xs} near ${nearEdge} from ${start}`
+        if (scan === null) {
+          assert.equal(s, null, label)
+          continue
+        }
+        if (scan >= start - 1e-9) {
+          assert.equal(s, start, label)
+          continue
+        }
+        found++
+        assert.ok(s >= scan - 1e-6 && s <= scan + 0.1 + G.SETBACK_TOL_CM, `${label}: search ${s} vs scan ${scan.toFixed(2)}`)
+        assert.equal(verdictAt(lights, s, nearEdge), "clear", `${label}: clear at the suggestion`)
+       }
+      }
+    }
+  }
+  assert.ok(found >= 15, `placements that need a move toward the wall (${found})`)
+})
+
+// B7: a "My eyes" height below 104 cm is named beside the verdict. Hand values: the UK
+// Inclusive Mobility guide gives wheelchair users' eye heights from 960 mm; with the whole glass
+// lit, a light D cm out reaches D x (200 - h) / 100, so a 96 cm eye with the lights at the 62 cm
+// demo setback sees glare to 62 x 1.04 = 64.48 cm (4.48 cm into the 60 cm near edge), and the
+// lights clear it only under 60 / 1.04 = 57.69 cm (the three verdict heights clear at 62.5).
+test("B7: a My eyes height under 104 cm is named beside the verdict, with its own answer", () => {
+  const names = { standing: "Standing", seated: "Seated", child: "Child seated" }
+  const live = (D, h) => ({ label: `My eyes (${Math.round(h)} cm)`, h,
+    result: G.eyeResultsFor(standardLights(D), [{ key: "my", h }], 60, 182, 100)[0] })
+  const three = (D) => G.eyeResultsFor(standardLights(D), G.VERDICT_HEIGHTS, 60, 182, 100)
+
+  // Positive: at 62 cm the three are clear, and a 96 cm eye is not.
+  const at62 = live(62, 96)
+  near(at62.result.endCm, 64.48, 0.01, "96 cm eye end at 62 cm")
+  near(at62.result.insideCm, 4.48, 0.01, "96 cm eye inside at 62 cm")
+  assert.equal(G.verdictText(three(62), names), "All three: clear")
+  assert.equal(G.verdictTextWithEye(three(62), names, at62), "All three: clear; My eyes (96 cm): glare")
+  assert.equal(G.overallVerdictWithEye(three(62), at62), "glare")
+
+  // Just under 60 / 1.04 the 96 cm eye clears too; just over, it does not.
+  assert.equal(G.verdictTextWithEye(three(57.6), names, live(57.6, 96)), "All three: clear; My eyes (96 cm): clear")
+  assert.equal(G.overallVerdictWithEye(three(57.6), live(57.6, 96)), "clear")
+  assert.equal(G.overallVerdictWithEye(three(57.8), live(57.8, 96)), "glare")
+
+  // At or above 104 cm, or with no live eye, the line is the three heights' verdict alone.
+  for (const h of [104, 109, 130, 160]) {
+    assert.equal(G.verdictTextWithEye(three(62), names, live(62, h)), "All three: clear", `My eyes at ${h} cm`)
+    assert.equal(G.overallVerdictWithEye(three(62), live(62, h)), "clear", `My eyes at ${h} cm`)
+  }
+  assert.equal(G.verdictTextWithEye(three(62), names, null), "All three: clear")
+
+  // With glare for the three, the low eye is added after them; a broken value reads as glare.
+  assert.equal(G.verdictTextWithEye(three(80.78), names, live(80.78, 96)),
+    "Glare in the viewing area: Seated, Child seated; My eyes (96 cm): glare")
+  const broken = { label: "My eyes (96 cm)", h: 96, result: { key: "my", endCm: Number.NaN, insideCm: null } }
+  assert.equal(G.verdictTextWithEye(three(62), names, broken), "All three: clear; My eyes (96 cm): glare")
+  assert.equal(G.overallVerdictWithEye(three(62), broken), "glare")
 })

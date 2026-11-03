@@ -10,7 +10,8 @@
 // Glare is tested against the glazing rectangle (the frame opening): GLASS_* below.
 //
 // This is a computed model: a point light mirrored in flat glass. It is not an optical
-// measurement. Light values are sample fixture values, not a real fixture.
+// measurement. The light values are a real fixture's published photometry (TSLight RXT13,
+// manufacturer data, not measured): see FIXTURES below.
 
 export type V3 = { x: number; y: number; z: number }
 
@@ -19,8 +20,8 @@ export type Room = {
   glassTopCm: number
   glassBottomCm: number
   glassHalfWidthCm: number
-  beamDeg: number // full beam angle of the sample fixture
-  candela: number // sample peak intensity at full dimmer
+  beamDeg: number // full beam angle of the default fixture (a light's own beamDeg wins)
+  candela: number // the default fixture's centre-beam intensity at full dimmer (a light's own wins)
 }
 
 export type Light = {
@@ -28,7 +29,12 @@ export type Light = {
   distanceCm: number // distance from the wall along its ceiling track
   tiltDeg: number // beam axis angle from straight down
   dimmer: number // 0..1
+  beamDeg?: number // this light's reflector: full beam angle (default: the room's)
+  candela?: number // this light's centre-beam intensity at full dimmer (default: the room's)
 }
+
+/** A track fixture's published photometry: full beam angle and centre-beam candlepower. */
+export type Fixture = { id: string; reflector: string; beamDeg: number; candela: number }
 
 export type Interval = { min: number; max: number }
 
@@ -45,8 +51,16 @@ export const EYE_CHILD_SEATED_CM = 104
 export const VIEWING_NEAR_CM = 60
 export const VIEWING_FAR_CM = 182
 export const VIEWING_HALF_WIDTH_CM = 100 // print half width plus 50 cm each side
-export const SAMPLE_BEAM_DEG = 25
-export const SAMPLE_CANDELA = 1500
+// TSLight RXT13 (Xicato module, 1,235 lm delivered), manufacturer data, not measured: the
+// centre-beam candlepower (CBCP) table in the RXT series specification sheet (tslight.com,
+// V2026.03.03, page 2), tested at 3000K, CRI 83. The same sheet's footcandle table agrees with
+// E = I / d^2 (5,000 cd at 5 ft is 200 fc; 2,700 cd is 108 fc), checked in the unit tests.
+// The model holds the centre-beam value across the whole beam angle and none outside it.
+export const FIXTURE_NAME = "TSLight RXT13"
+export const RXT13_40: Fixture = { id: "rxt13-40", reflector: "40 deg", beamDeg: 40, candela: 2700 }
+export const RXT13_20: Fixture = { id: "rxt13-20", reflector: "20 deg", beamDeg: 20, candela: 5000 }
+export const FIXTURES: Fixture[] = [RXT13_40, RXT13_20]
+export const DEFAULT_FIXTURE = RXT13_40
 export const WORKS_ON_PAPER_LUX = 50
 export const RULE_OF_THUMB_FACTOR = 0.577 // tan(30 deg), the 160 cm eye aiming rule
 export const TRACK_MIN_CM = 30
@@ -57,8 +71,18 @@ export const DEFAULT_ROOM: Room = {
   glassTopCm: GLASS_TOP_CM,
   glassBottomCm: GLASS_BOTTOM_CM,
   glassHalfWidthCm: GLASS_HALF_WIDTH_CM,
-  beamDeg: SAMPLE_BEAM_DEG,
-  candela: SAMPLE_CANDELA,
+  beamDeg: DEFAULT_FIXTURE.beamDeg,
+  candela: DEFAULT_FIXTURE.candela,
+}
+
+/** A light's full beam angle: its own reflector's, else the room's default fixture's. */
+export function beamDegOf(light: Light, room: Room = DEFAULT_ROOM): number {
+  return light.beamDeg ?? room.beamDeg
+}
+
+/** A light's centre-beam intensity at full dimmer: its own, else the room's default fixture's. */
+export function candelaOf(light: Light, room: Room = DEFAULT_ROOM): number {
+  return light.candela ?? room.candela
 }
 
 const DEG = Math.PI / 180
@@ -185,7 +209,7 @@ export function inBeam(light: Light, p: V3, room: Room = DEFAULT_ROOM): boolean 
   const len = length(d)
   if (len <= 1e-9) return false
   const cosAngle = dot(d, beamAxis(light, room)) / len
-  return cosAngle >= Math.cos((room.beamDeg / 2) * DEG)
+  return cosAngle >= Math.cos((beamDegOf(light, room) / 2) * DEG)
 }
 
 /**
@@ -194,9 +218,25 @@ export function inBeam(light: Light, p: V3, room: Room = DEFAULT_ROOM): boolean 
  */
 export function litXInterval(light: Light, y: number, room: Room = DEFAULT_ROOM): Interval | null {
   if (y < room.glassBottomCm - 1e-9 || y > room.glassTopCm + 1e-9) return null
-  const L = lightPosition(light, room)
-  const a = beamAxis(light, room)
-  const c = Math.cos((room.beamDeg / 2) * DEG)
+  return litXAt(beamOf(light, room), y, room)
+}
+
+/** A light's apex, beam axis and cos(half beam angle): the same for every height it is asked about. */
+type Beam = { L: V3; a: V3; c: number }
+
+function beamOf(light: Light, room: Room): Beam {
+  return { L: lightPosition(light, room), a: beamAxis(light, room), c: Math.cos((beamDegOf(light, room) / 2) * DEG) }
+}
+
+/**
+ * litXInterval with the beam worked out once by the caller: the span scan and the zone rows
+ * ask about many heights for one light (BUILD_LOG B1). Same arithmetic, same answers.
+ */
+function litXAt(beam: Beam, y: number, room: Room): Interval | null {
+  if (y < room.glassBottomCm - 1e-9 || y > room.glassTopCm + 1e-9) return null
+  const L = beam.L
+  const a = beam.a
+  const c = beam.c
   // d = (x - Lx, y - Ly, -Lz). Solve (d.a)^2 >= c^2 |d|^2 with d.a > 0, as a quadratic in u = x - Lx.
   const k = (y - L.y) * a.y - L.z * a.z
   const m = (y - L.y) * (y - L.y) + L.z * L.z
@@ -225,59 +265,84 @@ export function litXInterval(light: Light, y: number, room: Room = DEFAULT_ROOM)
       lo = Math.min(r1, r2)
       hi = Math.max(r1, r2)
     } else {
-      // Degenerate wide beam: not used by the sample fixture.
+      // Degenerate wide beam (a cone wider than the angle to the glass): not used by the RXT13.
       return null
     }
   }
   let xMin = Math.max(lo + L.x, -room.glassHalfWidthCm)
   let xMax = Math.min(hi + L.x, room.glassHalfWidthCm)
   if (xMin > xMax) return null
-  // Reject the mirror-image nappe of the cone (points behind the light).
+  // Reject the mirror-image nappe of the cone (points behind the light): d = (mid - Lx,
+  // y - Ly, -Lz) . a, written out so this hot path makes no object (BUILD_LOG B1).
   const mid = (xMin + xMax) / 2
-  const d = { x: mid - L.x, y: y - L.y, z: -L.z }
-  if (dot(d, a) <= 0) return null
+  if ((mid - L.x) * a.x + (y - L.y) * a.y + -L.z * a.z <= 0) return null
   xMin = Math.max(xMin, -room.glassHalfWidthCm)
   xMax = Math.min(xMax, room.glassHalfWidthCm)
   return { min: xMin, max: xMax }
 }
 
+// The lit span depends on the light's place and aim and on the room, not on the eye height,
+// but every zone row list (one per eye height, every frame of a drag) asked for it again:
+// up to 280 cone tests per call. The last few answers are kept by their inputs (BUILD_LOG B1).
+const SPAN_CACHE_SIZE = 8
+const spanCache: { key: string; span: Interval | null }[] = []
+
+/** Every input litGlassSpan reads, as one string (the span cache's key). A new model input must be added here. */
+export function litGlassSpanKey(light: Light, room: Room = DEFAULT_ROOM): string {
+  return `${light.xCm}|${light.distanceCm}|${light.tiltDeg}|${room.ceilingCm}|${room.glassTopCm}|` +
+    `${room.glassBottomCm}|${room.glassHalfWidthCm}|${beamDegOf(light, room)}`
+}
+
 /** Top and bottom of the lit part of the glass. Null when the beam misses the glass. */
 export function litGlassSpan(light: Light, room: Room = DEFAULT_ROOM): Interval | null {
+  const key = litGlassSpanKey(light, room)
+  let hit = spanCache.find((e) => e.key === key)
+  if (!hit) {
+    hit = { key, span: computeLitGlassSpan(light, room) }
+    spanCache.unshift(hit)
+    if (spanCache.length > SPAN_CACHE_SIZE) spanCache.pop()
+  }
+  // A copy, so a caller changing the result cannot change the cached answer.
+  return hit.span ? { min: hit.span.min, max: hit.span.max } : null
+}
+
+function computeLitGlassSpan(light: Light, room: Room): Interval | null {
   // Coarse scan (0.5 cm on a 100 cm glazing), then bisection refines each edge to well
   // under 0.001 cm. 200 steps instead of 2000 because this runs every frame while a light
   // is dragged; a preview trace after the change showed no difference in Scene::Update,
   // so the drag cost is elsewhere (BUILD_LOG row 3).
   const steps = 200
   const span = room.glassTopCm - room.glassBottomCm
+  const beam = beamOf(light, room)
   let top: number | null = null
   let bottom: number | null = null
   for (let i = 0; i <= steps; i++) {
     const y = room.glassTopCm - (span * i) / steps
-    if (litXInterval(light, y, room)) {
-      top = refineEdge(light, room, y, Math.min(room.glassTopCm, y + span / steps), true)
+    if (litXAt(beam, y, room)) {
+      top = refineEdge(beam, room, y, Math.min(room.glassTopCm, y + span / steps), true)
       break
     }
   }
   if (top === null) return null
   for (let i = 0; i <= steps; i++) {
     const y = room.glassBottomCm + (span * i) / steps
-    if (litXInterval(light, y, room)) {
-      bottom = refineEdge(light, room, y, Math.max(room.glassBottomCm, y - span / steps), false)
+    if (litXAt(beam, y, room)) {
+      bottom = refineEdge(beam, room, y, Math.max(room.glassBottomCm, y - span / steps), false)
       break
     }
   }
   return { min: bottom === null ? top : bottom, max: top }
 }
 
-function refineEdge(light: Light, room: Room, litY: number, unlitY: number, upward: boolean): number {
+function refineEdge(beam: Beam, room: Room, litY: number, unlitY: number, upward: boolean): number {
   // litY is lit; unlitY is the neighbouring sample (unlit, or the print edge itself).
-  if (upward && unlitY >= room.glassTopCm && litXInterval(light, room.glassTopCm, room)) return room.glassTopCm
-  if (!upward && unlitY <= room.glassBottomCm && litXInterval(light, room.glassBottomCm, room)) return room.glassBottomCm
+  if (upward && unlitY >= room.glassTopCm && litXAt(beam, room.glassTopCm, room)) return room.glassTopCm
+  if (!upward && unlitY <= room.glassBottomCm && litXAt(beam, room.glassBottomCm, room)) return room.glassBottomCm
   let a = litY
   let b = unlitY
   for (let i = 0; i < 40; i++) {
     const m = (a + b) / 2
-    if (litXInterval(light, m, room)) a = m
+    if (litXAt(beam, m, room)) a = m
     else b = m
   }
   return a
@@ -337,12 +402,13 @@ export function zoneRows(light: Light, h: number, stepCm: number = 2, room: Room
   const rows: ZoneRow[] = []
   const D = light.distanceCm
   const C = room.ceilingCm
+  const beam = beamOf(light, room)
   const start = Math.floor(depth.min / stepCm) * stepCm
   for (let z0 = start; z0 < depth.max; z0 += stepCm) {
     const z1 = Math.min(z0 + stepCm, depth.max)
     const zc = Math.max((Math.max(z0, depth.min) + z1) / 2, 1e-6)
     const py = h + ((C - h) * zc) / (zc + D)
-    const lit = litXInterval(light, py, room)
+    const lit = litXAt(beam, py, room)
     if (!lit) continue
     const xa = (lit.min * (zc + D) - light.xCm * zc) / D
     const xb = (lit.max * (zc + D) - light.xCm * zc) / D
@@ -351,33 +417,34 @@ export function zoneRows(light: Light, h: number, stepCm: number = 2, room: Room
   return rows
 }
 
-/** Union of several lights' zone rows, merged row by row so overlaps are drawn once. */
+/**
+ * Union of several lights' zone rows, merged row by row so overlaps are drawn once.
+ * Runs for every eye height on every frame of a drag, so it sorts one flat list instead of
+ * grouping by string keys and sorting each group (BUILD_LOG B1); the unit tests check it
+ * gives the same rows as the earlier grouping.
+ */
 export function combinedZoneRows(lights: Light[], h: number, stepCm: number = 2, room: Room = DEFAULT_ROOM): ZoneRow[] {
-  const byRow: { [key: string]: ZoneRow[] } = {}
+  const all: { k: number; r: ZoneRow }[] = []
   for (const light of lights) {
-    for (const r of zoneRows(light, h, stepCm, room)) {
-      const key = Math.floor(r.z0 / stepCm).toString()
-      if (!byRow[key]) byRow[key] = []
-      byRow[key].push(r)
-    }
+    for (const r of zoneRows(light, h, stepCm, room)) all.push({ k: Math.floor(r.z0 / stepCm), r })
   }
+  all.sort((a, b) => a.k - b.k || a.r.xMin - b.r.xMin)
   const out: ZoneRow[] = []
-  for (const key of Object.keys(byRow)) {
-    const rows = byRow[key].slice().sort((a, b) => a.xMin - b.xMin)
-    let cur = { ...rows[0] }
-    for (let i = 1; i < rows.length; i++) {
-      const r = rows[i]
-      if (r.xMin <= cur.xMax) {
-        cur.xMax = Math.max(cur.xMax, r.xMax)
-        cur.z0 = Math.min(cur.z0, r.z0)
-        cur.z1 = Math.max(cur.z1, r.z1)
-      } else {
-        out.push(cur)
-        cur = { ...r }
-      }
+  let cur: ZoneRow | null = null
+  let curK = 0
+  for (const e of all) {
+    const r = e.r
+    if (cur !== null && e.k === curK && r.xMin <= cur.xMax) {
+      cur.xMax = Math.max(cur.xMax, r.xMax)
+      cur.z0 = Math.min(cur.z0, r.z0)
+      cur.z1 = Math.max(cur.z1, r.z1)
+    } else {
+      if (cur !== null) out.push(cur)
+      cur = { z0: r.z0, z1: r.z1, xMin: r.xMin, xMax: r.xMax }
+      curK = e.k
     }
-    out.push(cur)
   }
+  if (cur !== null) out.push(cur)
   out.sort((a, b) => a.z0 - b.z0 || a.xMin - b.xMin)
   return out
 }
@@ -443,7 +510,8 @@ export function overallVerdict(eyes: EyeResult[]): "clear" | "glare" {
 
 /** A light whose numbers are all real can be computed; one with a missing or broken value cannot. */
 export function lightComputable(light: Light): boolean {
-  return [light.xCm, light.distanceCm, light.tiltDeg, light.dimmer].every((v) => Number.isFinite(v))
+  const own = [light.beamDeg, light.candela].filter((v) => v !== undefined) as number[]
+  return [light.xCm, light.distanceCm, light.tiltDeg, light.dimmer, ...own].every((v) => Number.isFinite(v))
 }
 
 /** Zone rows can be used only when every number in them is real. */
@@ -471,6 +539,37 @@ export function verdictText(eyes: EyeResult[], names: { [key: string]: string })
     parts.push(inside.length > 0 ? `cannot be computed: ${who}` : `Glare (cannot be computed): ${who}`)
   }
   return parts.length > 0 ? parts.join("; ") : "Glare (no eye heights)"
+}
+
+/** A live eye height (the "My eyes" preset) with its own result, as shown beside the verdict. */
+export type LiveEye = { label: string; h: number; result: EyeResult }
+
+/** The lowest of the three eye heights the verdict speaks for (child seated, 104 cm). */
+export const LOWEST_VERDICT_EYE_CM = EYE_CHILD_SEATED_CM
+
+/** True when a live eye height sits below all three verdict eye heights, so the verdict cannot speak for it. */
+export function liveEyeBelowVerdict(live: LiveEye | null): boolean {
+  return live !== null && live.h < LOWEST_VERDICT_EYE_CM
+}
+
+/**
+ * The verdict line with a live eye height (B7). "All three: clear" speaks for 160, 109 and
+ * 104 cm only. A live eye below 104 cm (wheelchair users' eyes can be as low as 96 cm) is
+ * named after the verdict with its own answer, by the same rule ("All three: clear; My eyes
+ * (96 cm): glare"), so a clear verdict never reads as clear for every lower eye. Otherwise the
+ * line is verdictText's.
+ */
+export function verdictTextWithEye(eyes: EyeResult[], names: { [key: string]: string }, live: LiveEye | null): string {
+  const base = verdictText(eyes, names)
+  if (!liveEyeBelowVerdict(live)) return base
+  const l = live as LiveEye
+  return `${base}; ${l.label}: ${overallVerdict([l.result])}`
+}
+
+/** "clear" only when the three eye heights are clear and so is a live eye below them (B7). */
+export function overallVerdictWithEye(eyes: EyeResult[], live: LiveEye | null): "clear" | "glare" {
+  if (overallVerdict(eyes) !== "clear") return "glare"
+  return liveEyeBelowVerdict(live) ? overallVerdict([(live as LiveEye).result]) : "clear"
 }
 
 function logNum(x: number): string {
@@ -537,37 +636,48 @@ function subtractIntervals(a: Interval[], b: Interval[]): Interval[] {
  */
 export function zoneOutline(rows: ZoneRow[], stepCm: number, thicknessCm: number): ZoneRow[] {
   const h = thicknessCm / 2
-  const slabs: { [k: string]: ZoneRow[] } = {}
-  const keys: number[] = []
+  // Rows grouped into slabs (one per row step). Each slab's x cover, top and bottom are
+  // worked out once, not again for each neighbour: this runs for two eye heights on every
+  // frame of a drag (BUILD_LOG B1). The unit tests check it against the earlier version.
+  type Slab = { k: number; rows: ZoneRow[]; cover: Interval[]; top: number; bottom: number }
+  const slabs: Slab[] = []
+  const byKey = new Map<number, Slab>()
   for (const r of rows) {
     const k = Math.floor(r.z0 / stepCm + 1e-9)
-    if (!slabs[k]) {
-      slabs[k] = []
-      keys.push(k)
+    let s = byKey.get(k)
+    if (!s) {
+      s = { k, rows: [], cover: [], top: -Infinity, bottom: Infinity }
+      byKey.set(k, s)
+      slabs.push(s)
     }
-    slabs[k].push(r)
+    s.rows.push(r)
   }
-  keys.sort((a, b) => a - b)
+  slabs.sort((a, b) => a.k - b.k)
+  for (const s of slabs) {
+    for (const r of s.rows) {
+      s.cover.push({ min: r.xMin, max: r.xMax })
+      s.top = Math.max(s.top, r.z1)
+      s.bottom = Math.min(s.bottom, r.z0)
+    }
+    if (s.cover.length > 1) s.cover.sort((a, b) => a.min - b.min)
+  }
   const out: ZoneRow[] = []
   for (const r of rows) {
     out.push({ z0: r.z0, z1: r.z1, xMin: r.xMin - h, xMax: r.xMin + h })
     out.push({ z0: r.z0, z1: r.z1, xMin: r.xMax - h, xMax: r.xMax + h })
   }
-  const cover = (rs: ZoneRow[]): Interval[] =>
-    rs.map((r) => ({ min: r.xMin, max: r.xMax })).sort((a, b) => a.min - b.min)
   const strip = (iv: Interval, z: number) => out.push({ z0: z - h, z1: z + h, xMin: iv.min - h, xMax: iv.max + h })
-  for (let i = 0; i <= keys.length; i++) {
-    const prev = i > 0 ? slabs[keys[i - 1]] : []
-    const next = i < keys.length ? slabs[keys[i]] : []
-    const adjacent = i > 0 && i < keys.length && keys[i] === keys[i - 1] + 1
-    const prevTop = prev.reduce((m, r) => Math.max(m, r.z1), -Infinity)
-    const nextBottom = next.reduce((m, r) => Math.min(m, r.z0), Infinity)
+  const none: Slab = { k: 0, rows: [], cover: [], top: -Infinity, bottom: Infinity }
+  for (let i = 0; i <= slabs.length; i++) {
+    const prev = i > 0 ? slabs[i - 1] : none
+    const next = i < slabs.length ? slabs[i] : none
+    const adjacent = i > 0 && i < slabs.length && next.k === prev.k + 1
     if (adjacent) {
-      for (const iv of subtractIntervals(cover(prev), cover(next))) strip(iv, prevTop)
-      for (const iv of subtractIntervals(cover(next), cover(prev))) strip(iv, nextBottom)
+      for (const iv of subtractIntervals(prev.cover, next.cover)) strip(iv, prev.top)
+      for (const iv of subtractIntervals(next.cover, prev.cover)) strip(iv, next.bottom)
     } else {
-      for (const iv of cover(prev)) strip(iv, prevTop)
-      for (const iv of cover(next)) strip(iv, nextBottom)
+      for (const iv of prev.cover) strip(iv, prev.top)
+      for (const iv of next.cover) strip(iv, next.bottom)
     }
   }
   return out
@@ -600,13 +710,110 @@ export function passesViewingArea(
 }
 
 // ---------------------------------------------------------------------------
+// Suggest a setback (B5): how far out the lights can hang with all three eye heights clear.
+// ---------------------------------------------------------------------------
+
+/** The three eye heights the verdict speaks for ("All three: clear"). */
+export const VERDICT_HEIGHTS: { key: string; h: number }[] = [
+  { key: "standing", h: EYE_STANDING_CM },
+  { key: "seated", h: EYE_SEATED_CM },
+  { key: "child", h: EYE_CHILD_SEATED_CM },
+]
+
+/**
+ * Each eye height's result for these lights, by the same rule as the Lens's answer card:
+ * the combined zone rows (stepCm rows), the zone's far end, and how deep it reaches into the
+ * viewing area (touching counts as inside). A light or a row that cannot be computed gives an
+ * end that is not a number, which reads as glare.
+ */
+export function eyeResultsFor(
+  lights: Light[],
+  heights: { key: string; h: number }[],
+  nearCm: number,
+  farCm: number,
+  halfWidthCm: number,
+  stepCm: number = 2,
+  room: Room = DEFAULT_ROOM,
+): EyeResult[] {
+  const lightsOk = lights.every((l) => lightComputable(l))
+  return heights.map(({ key, h }) => {
+    if (!lightsOk || !Number.isFinite(h)) return { key, endCm: Number.NaN, insideCm: null }
+    const rows = combinedZoneRows(lights, h, stepCm, room)
+    if (!rowsComputable(rows)) return { key, endCm: Number.NaN, insideCm: null }
+    return { key, endCm: zoneFarEdge(rows), insideCm: insideDepth(overlapRows(rows, nearCm, farCm, halfWidthCm)) }
+  })
+}
+
+/** How close (cm) the suggested setback is to the boundary: it is always on the clear side. */
+export const SETBACK_TOL_CM = 0.01
+
+/** The coarse step (cm) of the setback search, before bisection refines it. */
+export const SETBACK_SCAN_CM = 2
+
+/**
+ * Suggest a setback: moving every light toward the wall along its track from where the
+ * farthest one hangs now, each keeping its tilt and its place along the track (as the distance
+ * slider moves it), the first distance at which all three eye heights are clear. That is the
+ * clear setback nearest to where the lights are. Returns the starting distance when the lights
+ * are already clear there, and null when no distance down to TRACK_MIN_CM is clear (or a light
+ * cannot be computed).
+ *
+ * Only toward the wall: with the tilt kept, a light moved far out aims so low that its beam
+ * leaves the glass and the zones vanish, which is clear but no longer lights the print.
+ *
+ * A 2 cm scan inward finds the first clear step; bisection then refines it to SETBACK_TOL_CM,
+ * always on the clear side (a zone reaching exactly the near edge counts as inside), so at the
+ * standard placement the answer is just under 60 / 0.96 = 62.5 cm (child seated binds). The
+ * unit tests check it against a 0.1 cm scan.
+ */
+export function suggestSetbackCm(
+  lights: Light[],
+  nearCm: number = VIEWING_NEAR_CM,
+  farCm: number = VIEWING_FAR_CM,
+  halfWidthCm: number = VIEWING_HALF_WIDTH_CM,
+  heights: { key: string; h: number }[] = VERDICT_HEIGHTS,
+  room: Room = DEFAULT_ROOM,
+): number | null {
+  if (lights.length === 0 || !lights.every((l) => lightComputable(l))) return null
+  const clearAt = (D: number) =>
+    overallVerdict(eyeResultsFor(lights.map((l) => ({ ...l, distanceCm: D })), heights, nearCm, farCm, halfWidthCm, 2, room)) === "clear"
+  const start = clamp(Math.max(...lights.map((l) => l.distanceCm)), TRACK_MIN_CM, TRACK_MAX_CM)
+  if (clearAt(start)) return start
+  let glare = start
+  let clear: number | null = null
+  for (let D = start - SETBACK_SCAN_CM; ; D -= SETBACK_SCAN_CM) {
+    const d = Math.max(D, TRACK_MIN_CM)
+    if (clearAt(d)) {
+      clear = d
+      break
+    }
+    glare = d
+    if (d <= TRACK_MIN_CM) break
+  }
+  if (clear === null) return null
+  let lo = clear
+  let hi = glare
+  while (hi - lo > SETBACK_TOL_CM) {
+    const mid = (lo + hi) / 2
+    if (clearAt(mid)) lo = mid
+    else hi = mid
+  }
+  return lo
+}
+
+/** The marker's label: the setback rounded down to a millimetre, so the number shown is clear. */
+export function setbackLabel(cm: number): string {
+  return `All three clear at ${(Math.floor(cm * 10 + 1e-9) / 10).toFixed(1)} cm`
+}
+
+// ---------------------------------------------------------------------------
 // The computed light level.
 // ---------------------------------------------------------------------------
 
 /**
  * Illuminance in lux at point p on the print from one light: intensity toward p x
  * cos(angle of incidence) / distance squared (distance in metres), scaled by the dimmer.
- * The sample fixture is modelled as constant intensity inside its beam and none outside.
+ * The fixture is modelled as its centre-beam intensity held across its beam angle, none outside.
  */
 export function illuminanceLux(light: Light, p: V3, room: Room = DEFAULT_ROOM): number {
   if (!inBeam(light, p, room)) return 0
@@ -617,7 +824,7 @@ export function illuminanceLux(light: Light, p: V3, room: Room = DEFAULT_ROOM): 
   const cosIncidence = d.z / dist // the glass faces +z
   if (cosIncidence <= 0) return 0
   const metres = dist / 100
-  return (room.candela * clamp(light.dimmer, 0, 1) * cosIncidence) / (metres * metres)
+  return (candelaOf(light, room) * clamp(light.dimmer, 0, 1) * cosIncidence) / (metres * metres)
 }
 
 export function totalIlluminanceLux(lights: Light[], p: V3, room: Room = DEFAULT_ROOM): number {

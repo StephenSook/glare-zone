@@ -15,10 +15,13 @@ const CONTENT_Z_OFFSET = 0.08 // a label drawn on a button face sits just in fro
 // the knobs stay at least 1 deg from the handle.
 const CELL_SLIDER_Y = 0.7 // dimmer cell: slider on top, value under it
 const CELL_VALUE_Y = -5.1
-// Button row with More open: Eye height 14, Save results 10.5, More 10.5, Paper art 8.5 and
-// 2 cm gaps = 49.5 cm, centred: the three-button row shifts left, Paper art on the right.
-const MAIN_ROW_SHIFT = -5.25
-const PAPER_ART_X = 20.5
+// Button row with More open: Eye height 14, Save results 9.5, More 9.5, Paper art 6.5,
+// Reflector 6.5 and 2 cm gaps = 54 cm, centred: the three-button row shifts left, Paper art
+// and Reflector on the right. At about 1 m that is 15.0 deg either side; the preview's display
+// is 16.15 deg either side (vertical FOV 36.6 deg, aspect 0.8755), and C7 keeps 0.5 deg clear.
+const MAIN_ROW_SHIFT = -8.5
+const PAPER_ART_X = 15.25
+const REFLECTOR_X = 23.75
 const TEXT_PRIMARY = new vec4(1, 1, 1, 1)
 const TEXT_SMALL = new vec4(1, 1, 1, 0.75)
 
@@ -53,6 +56,7 @@ export class GlareZoneUI extends BaseScriptComponent {
   private _onDimmer = new Event<LightValue>()
   private _onDistance = new Event<LightValue>()
   private _onAdjust = new Event<void>()
+  private _onReflector = new Event<boolean>()
 
   get onEyeCycle(): PublicApi<void> {
     return this._onEyeCycle.publicApi()
@@ -78,6 +82,10 @@ export class GlareZoneUI extends BaseScriptComponent {
   get onDistance(): PublicApi<LightValue> {
     return this._onDistance.publicApi()
   }
+  /** The reflector toggle: true for the narrow (20 deg) reflector, false for the default 40 deg. */
+  get onReflector(): PublicApi<boolean> {
+    return this._onReflector.publicApi()
+  }
   /** Fires while any slider is being moved, so the zones show at full strength. */
   get onAdjust(): PublicApi<void> {
     return this._onAdjust.publicApi()
@@ -90,6 +98,9 @@ export class GlareZoneUI extends BaseScriptComponent {
   private moreLabel!: Text
   private paperArtButton!: Button
   private paperArtObj!: SceneObject
+  private reflectorButton!: Button
+  private reflectorObj!: SceneObject
+  private reflectorHint!: Text
   private dimmerSliders: Slider[] = []
   private distanceSliders: Slider[] = []
   private dimmerLabels: Text[] = []
@@ -107,8 +118,8 @@ export class GlareZoneUI extends BaseScriptComponent {
     this.sceneObject.createComponent("Component.Canvas")
     this.mainRow = this.buildRow("Main buttons", 0, [
       {name: "Eye height button", label: "Eye height: Standing", hint: "click to change", width: 14},
-      {name: "Save results button", label: "Save results", width: 10.5},
-      {name: "More button", label: "More controls", width: 10.5},
+      {name: "Save results button", label: "Save results", width: 9.5},
+      {name: "More button", label: "More controls", width: 9.5},
     ])
     this.resultsRow = this.buildRow("Results buttons", 0, [
       {name: "Done button", label: "Done", hint: "keep these lights", width: 13},
@@ -145,6 +156,17 @@ export class GlareZoneUI extends BaseScriptComponent {
 
   setPaperArt(on: boolean): void {
     if (this.paperArtButton) this.paperArtButton.isOn = on
+  }
+
+  /** Show the reflector in use (true: the narrow 20 deg reflector) without echoing an event. */
+  setReflector(narrow: boolean, hint: string): void {
+    if (this.reflectorButton) this.reflectorButton.isOn = narrow
+    if (this.reflectorHint) this.reflectorHint.text = hint
+  }
+
+  /** The reflector button's hint as shown ("40 deg"), "" while hidden. */
+  reflectorHintText(): string {
+    return this.reflectorHint && this.reflectorHint.getSceneObject().isEnabledInHierarchy ? this.reflectorHint.text : ""
   }
 
   setMoreOpen(open: boolean): void {
@@ -213,6 +235,7 @@ export class GlareZoneUI extends BaseScriptComponent {
     // With More open, "Paper art" joins the button row on the right and the row shifts left.
     const more = this.moreOpen && !this.results
     this.paperArtObj.enabled = more
+    this.reflectorObj.enabled = more
     this.mainRow.getTransform().setLocalPosition(new vec3(more ? MAIN_ROW_SHIFT : 0, 0, 0))
     if (this.moreLabel) this.moreLabel.text = this.moreOpen ? "Fewer controls" : "More controls"
   }
@@ -399,6 +422,21 @@ export class GlareZoneUI extends BaseScriptComponent {
     const label = this.addButtonLabel(so, "Paper art", "50 lux limit", L.paperArtWidth)
     this.wireButton("Paper art button", button, label)
     this.paperArtObj = so
+    // "Reflector" beside it (B3): the RXT13's 40 deg reflector (the default) or its 20 deg one.
+    const ro = global.scene.createSceneObject("Reflector button")
+    ro.setParent(this.sceneObject)
+    ro.getTransform().setLocalPosition(new vec3(REFLECTOR_X, 0, 0))
+    const rb = ro.createComponent(Button.getTypeName()) as Button
+    rb.onInitialized.add(() => {
+      rb.size = new vec3(L.reflectorWidth, L.buttonHeight, 1)
+    })
+    rb.setIsToggleable(true)
+    this.trackInit(rb)
+    this.makeLabel(ro, "Label", "Reflector", L.buttonEm, 0.75, L.reflectorWidth, TEXT_PRIMARY, 600)
+    this.reflectorHint = this.makeLabel(ro, "Hint", "40 deg", L.hintEm, -1.1, L.reflectorWidth, TEXT_SMALL, 500)
+    this.reflectorButton = rb
+    rb.onTriggerUp.add(() => this._onReflector.invoke(rb.isOn))
+    this.reflectorObj = ro
   }
 
   /** Text in a column (on the column's backing), centred. */

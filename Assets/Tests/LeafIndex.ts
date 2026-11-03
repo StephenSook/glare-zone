@@ -13,6 +13,7 @@ import {GlareC10RecallPanels} from "./GlareC10RecallPanels"
 import {GlareC11FullThenFaint} from "./GlareC11FullThenFaint"
 import {GlareC12FloorOverlap} from "./GlareC12FloorOverlap"
 import {GlareMediaFilm07} from "./GlareMediaFilm07"
+import {GlareMediaClipV2} from "./GlareMediaClipV2"
 import {GlareMediaSavedSheet} from "./GlareMediaSavedSheet"
 import {GlareMediaMoreOpen} from "./GlareMediaMoreOpen"
 import {GlareMediaSeated} from "./GlareMediaSeated"
@@ -32,6 +33,11 @@ import {GlareC16ChangeWhileMoving} from "./GlareC16ChangeWhileMoving"
 import {GlareC17FloorRingHold} from "./GlareC17FloorRingHold"
 import {GlareC18RealScale} from "./GlareC18RealScale"
 import {GlareC19IKReach} from "./GlareC19IKReach"
+import {GlareC20SetbackGhost} from "./GlareC20SetbackGhost"
+import {GlareC21Reflector} from "./GlareC21Reflector"
+import {GlareC22MyEyesLow} from "./GlareC22MyEyesLow"
+import {GlareC23ClearCue} from "./GlareC23ClearCue"
+import {GlareC24LimitsLine} from "./GlareC24LimitsLine"
 
 @component
 export class LeafIndex extends BaseScriptComponent {
@@ -56,6 +62,11 @@ export class LeafIndex extends BaseScriptComponent {
     {id: "glare-c17-floor-ring-hold", typename: GlareC17FloorRingHold.getTypeName()},
     {id: "glare-c18-real-scale", typename: GlareC18RealScale.getTypeName()},
     {id: "glare-c19-ik-reach", typename: GlareC19IKReach.getTypeName()},
+    {id: "glare-c20-setback-ghost", typename: GlareC20SetbackGhost.getTypeName()},
+    {id: "glare-c21-reflector", typename: GlareC21Reflector.getTypeName()},
+    {id: "glare-c22-my-eyes-low", typename: GlareC22MyEyesLow.getTypeName()},
+    {id: "glare-c23-clear-cue", typename: GlareC23ClearCue.getTypeName()},
+    {id: "glare-c24-limits-line", typename: GlareC24LimitsLine.getTypeName()},
     {id: "media-saved-sheet", typename: GlareMediaSavedSheet.getTypeName()}, // media helper, not a test
     {id: "media-more-open", typename: GlareMediaMoreOpen.getTypeName()}, // media helper, not a test
     {id: "media-seated", typename: GlareMediaSeated.getTypeName()}, // media helper, not a test
@@ -65,6 +76,7 @@ export class LeafIndex extends BaseScriptComponent {
     {id: "media-film-04", typename: GlareMediaFilm04.getTypeName()}, // film still helper, not a test
     {id: "media-film-05", typename: GlareMediaFilm05.getTypeName()}, // film still helper, not a test
     {id: "media-film-07", typename: GlareMediaFilm07.getTypeName()}, // film still helper, not a test
+    {id: "media-clip-v2", typename: GlareMediaClipV2.getTypeName()}, // preview clip timeline (v2), not a test
     {id: "perf-exerciser", typename: GlarePerfExerciser.getTypeName()}, // perf helper, not a test
     {id: "perf-idle", typename: GlarePerfIdle.getTypeName()}, // perf helper, not a test
     {id: "perf-exerciser-no-overlays", typename: GlarePerfExerciserNoOverlays.getTypeName()}, // perf A/B helper

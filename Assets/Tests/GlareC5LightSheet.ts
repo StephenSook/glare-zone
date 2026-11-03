@@ -29,7 +29,8 @@ export class GlareC5LightSheet extends Scenario {
       expect(has(t, "Standing, eyes 160 cm: PASS, glare to 32.3 cm"), "standing passes").toBe(true)
       expect(has(t, "Seated, eyes 109 cm: FAIL, glare to 73.5 cm"), "seated fails").toBe(true)
       expect(has(t, "Child seated, eyes 104 cm: FAIL, glare to 77.5 cm"), "child seated fails").toBe(true)
-      expect(has(t, "Sample fixture"), "sample fixture values labelled on the card").toBe(true)
+      expect(has(t, "TSLight RXT13, manufacturer data, not measured"), "the fixture labelled on the card (B3)").toBe(true)
+      expect(has(t, "reflector 40 deg"), "the reflector on the card").toBe(true)
       expect(has(t, "CCI Notes 2/3") && has(t, "Smithsonian"), "eye-height sources on the card").toBe(true)
     }
 

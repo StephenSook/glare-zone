@@ -93,15 +93,25 @@ const LAMP_RAY_THICKNESS = 0.4
 const GHOST_RENDER_ORDER = 50
 const SPOT_LABEL_RENDER_ORDER = 5 // labels on the glass and floor, at their own depth
 const SPOT_LABEL_ABOVE_CM = 5.5 // clear of the spot's 4 cm halo
+// Suggest a setback (B5): a faint green ghost of each fixture on its track where all three
+// eye heights would be clear, and one short label between them.
+const SETBACK_COLOR = new vec4(0.45, 1.0, 0.6, 0.35)
+const SETBACK_LABEL_COLOR = new vec4(0.6, 1.0, 0.72, 0.95)
+const SETBACK_LABEL_BELOW_CM = 22 // under the tracks, between the two ghost fixtures
 
-// The disclosure, as the answer card's second line.
-const DISCLAIMER = "Computed reflection, sample lamp values, not measured"
+// The disclosure and the model's limits (eighth note), as one line under the verdict: the
+// answer holds for flat glass in this room's sizes, so "All three: clear" is not a promise
+// about every room.
+const DISCLAIMER = "Computed for flat glass in this room; manufacturer lamp data, not measured"
+// The clear cue's volume: a quiet confirmation (the WAV itself is peak-normalized).
+const CLEAR_CUE_VOLUME = 0.35
 
 // Sources: 160 cm is CCI Notes 2/3's "typical adult eye level" behind D = (H - 160) x 0.577;
 // 109 cm (adult wheelchair user) and 104 cm (6-to-9-year-old wheelchair user, about 1036 mm)
 // are from the Smithsonian Guidelines for Accessible Exhibition Design.
 const SHEET_SOURCES = "Eyes: 160 CCI Notes 2/3; 109, 104 Smithsonian"
-const SHEET_FIXTURE = "Sample fixture (not real): 25 deg, 1,500 cd"
+// The fixture (B3): TSLight RXT13 photometry from its specification sheet (GlareMath FIXTURES).
+const SHEET_FIXTURE = `${G.FIXTURE_NAME}, manufacturer data, not measured`
 const SHEET_SMALL_LINES = 2
 
 /**
@@ -166,6 +176,21 @@ export class GlareZoneController extends BaseScriptComponent {
   private edgeKnobObjects: SceneObject[] = []
   private edgeAccum = [0, 0]
   private dirty = true
+  // Per-frame rebuild bookkeeping (BUILD_LOG B1): the overlap waits for the batch, and each
+  // light's beam is rebuilt only when its inputs change.
+  private deferOverlap = false
+  private overlapPending = false
+  private lightBuilt: string[] = []
+  private fixture: G.Fixture = G.DEFAULT_FIXTURE
+  // Suggest a setback (B5): solved when a move settles and its inputs changed.
+  private setbackMarkers: DynamicMesh[] = []
+  private setbackLabelText!: Text
+  private setbackInputs = ""
+  private setbackAimInputs = ""
+  private setbackCm: number | null = null
+  private setbackFrom = 0
+  private setbackSolveMsLast = 0
+  private lastVerdict: "clear" | "glare" = "glare"
   private lastAdjustTime = -100
   private glarePoints: G.V3[] = []
   private ghostRoot!: SceneObject
@@ -217,13 +242,20 @@ export class GlareZoneController extends BaseScriptComponent {
   private loggedLights: {d: number; t: number}[] = []
   private moveOpen = false
   private moveStartEnds: {[k: string]: number} = {}
+  // The "All three: clear" cue (seventh note): a soft two-bell tone made with CLAD's build-sfx
+  // (Assets/GeneratedSFX/all_three_clear.wav), played once on the frame the answer card turns clear.
+  private clearCue: AudioComponent | null = null
+  private cueVerdict: "clear" | "glare" | "" = ""
+  private cueStats = {plays: 0, playFrame: -1, clearFrame: -1, playingAtPlay: false}
+  private frameNo = 0
 
   onAwake(): void {
     print(`Lens Opened: ${LENS_VERSION}`)
     const D0 = G.standardPlacementCm()
     const tilt0 = G.tiltForAim(50, D0, 150)
-    this.lights.push({xCm: -50, distanceCm: D0, tiltDeg: tilt0, dimmer: 1})
-    this.lights.push({xCm: 50, distanceCm: D0, tiltDeg: tilt0, dimmer: 1})
+    const f = G.DEFAULT_FIXTURE
+    this.lights.push({xCm: -50, distanceCm: D0, tiltDeg: tilt0, dimmer: 1, beamDeg: f.beamDeg, candela: f.candela})
+    this.lights.push({xCm: 50, distanceCm: D0, tiltDeg: tilt0, dimmer: 1, beamDeg: f.beamDeg, candela: f.candela})
     this.loggedLights = this.lights.map((l) => ({d: l.distanceCm, t: l.tiltDeg}))
     this.buildGallery()
     this.createEvent("OnStartEvent").bind(() => {
@@ -343,7 +375,32 @@ export class GlareZoneController extends BaseScriptComponent {
       this.setLightTilt(i, tilt0)
       this.setDimmer(i, 1)
     }
+    this.setReflector(G.DEFAULT_FIXTURE)
     this.closeLightSheets()
+  }
+
+  /**
+   * The lights' reflector (B3): the TSLight RXT13's 40 deg reflector (default, 2,700 cd) or
+   * its 20 deg one (5,000 cd). Both lights take it; their zones and light levels follow.
+   */
+  setReflector(f: G.Fixture): void {
+    this.fixture = f
+    for (const l of this.lights) {
+      l.beamDeg = f.beamDeg
+      l.candela = f.candela
+    }
+    if (this.ui) this.ui.setReflector(f !== G.DEFAULT_FIXTURE, f.reflector)
+    this.markAdjusted()
+  }
+
+  /** The reflector in use. */
+  reflector(): G.Fixture {
+    return this.fixture
+  }
+
+  /** The Reflector button's hint as shown ("40 deg"), "" while More controls are closed. */
+  reflectorHint(): string {
+    return this.ui ? this.ui.reflectorHintText() : ""
   }
 
   setViewingArea(nearCm: number, farCm: number): void {
@@ -369,7 +426,7 @@ export class GlareZoneController extends BaseScriptComponent {
       `Light ${light === 0 ? "L" : "R"} results (computed)`,
       `Tilt ${G.oneDecimal(l.tiltDeg)} deg from vertical`,
       `Distance from wall ${G.oneDecimal(l.distanceCm)} cm`,
-      `Dimmer ${Math.round(l.dimmer * 100)}%`,
+      `Dimmer ${Math.round(l.dimmer * 100)}%, reflector ${this.fixture.reflector}`,
     ]
     for (const eye of EYES) {
       if (!G.lightComputable(l)) {
@@ -521,6 +578,10 @@ export class GlareZoneController extends BaseScriptComponent {
     return this.disclaimer.getSceneObject().isEnabledInHierarchy ? this.disclaimer.text : ""
   }
 
+  disclaimerComponent(): Text {
+    return this.disclaimer
+  }
+
   versionText(): string {
     return this.versionLabel.getSceneObject().isEnabledInHierarchy ? this.versionLabel.text : ""
   }
@@ -607,9 +668,24 @@ export class GlareZoneController extends BaseScriptComponent {
 
   /** The verdict in words: "All three: clear", or which eye heights see glare or cannot be computed. */
   verdictText(): string {
+    return G.verdictText(this.eyeResults(), this.eyeNames())
+  }
+
+  /** The live "My eyes" height and its result while that preset is chosen (B7), else null. */
+  private liveEye(): G.LiveEye | null {
+    if (this.eyePreset !== "my") return null
+    const rows = this.zoneRows["my"] || []
+    const result: G.EyeResult = this.zoneBad["my"]
+      ? {key: "my", endCm: Number.NaN, insideCm: null}
+      : {key: "my", endCm: G.zoneFarEdge(rows),
+        insideCm: G.insideDepth(G.overlapRows(rows, this.viewingNearCm, this.viewingFarCm, LAYOUT.viewingHalfWidth))}
+    return {label: `${MY_EYES_LABEL} (${Math.round(this.myEyeHeightCm)} cm)`, h: this.myEyeHeightCm, result}
+  }
+
+  private eyeNames(): {[k: string]: string} {
     const names: {[k: string]: string} = {}
     for (const e of EYES) names[e.key] = e.label
-    return G.verdictText(this.eyeResults(), names)
+    return names
   }
 
   /** True when an eye height's zone cannot be computed (it then reads as glare). */
@@ -944,7 +1020,12 @@ export class GlareZoneController extends BaseScriptComponent {
       this.fixtures.push(fixture)
       this.beamMeshes.push(new DynamicMesh(this.gallery, `Beam ${tag}`, this.mat(new vec4(1, 0.95, 0.75, BEAM_ALPHA))))
       this.buildHandle(i)
+      const marker = new DynamicMesh(this.gallery, `Setback marker ${tag}`, this.mat(SETBACK_COLOR))
+      marker.visual.setRenderOrder(GHOST_RENDER_ORDER)
+      this.setbackMarkers.push(marker)
     }
+    this.setbackLabelText = makeText(this.gallery, "Setback label", "", LAYOUT.smallEm * 2, SETBACK_LABEL_COLOR)
+    this.setbackLabelText.getSceneObject().enabled = false
 
     // Eye-height marks on the wall either side of the print, in each eye height's colour
     // (the legend on the answer card names them).
@@ -1071,6 +1152,7 @@ export class GlareZoneController extends BaseScriptComponent {
     this.answerCard.getTransform().setLocalPosition(new vec3(0, LAYOUT.answerY, -d))
     this.answerCard.getTransform().setLocalRotation(quat.angleAxis(Math.atan2(LAYOUT.answerY, d), vec3.right()))
     this.buildAnswerCard()
+    this.buildClearCue()
 
     this.controlsPanel = global.scene.createSceneObject("Near controls")
     this.controlsPanel.setParent(this.anchor)
@@ -1299,8 +1381,11 @@ export class GlareZoneController extends BaseScriptComponent {
     // Item D: the answer card is one line (the chosen eye height) plus the verdict for all three.
     this.verdictLine = this.cardTextAt(this.answerCard, "Verdict", "", LAYOUT.headlineEm * 0.8, white,
       HorizontalAlignment.Center, 0, VERDICT_Y, W - 2, 700)
+    // A long verdict (B7 adds a My eyes height) shrinks to fit the card instead of running past it.
+    this.verdictLine.horizontalOverflow = HorizontalOverflow.Shrink
     this.disclaimer = this.cardTextAt(this.answerCard, "Disclaimer", DISCLAIMER, LAYOUT.disclaimerEm,
       new vec4(1, 1, 1, 0.85), HorizontalAlignment.Center, 0, DISCLAIMER_Y, W - 2, 500)
+    this.disclaimer.horizontalOverflow = HorizontalOverflow.Shrink
     this.versionLabel = this.cardTextAt(this.answerCard, "Version", LENS_VERSION, LAYOUT.versionEm,
       new vec4(1, 1, 1, 0.7), HorizontalAlignment.Right, W / 2 - 0.7, -H / 2 + 1.1, 8, 500)
 
@@ -1382,10 +1467,59 @@ export class GlareZoneController extends BaseScriptComponent {
       if (show) label.text = this.moveOpen ? this.changeLine(key) : this.laneLine(key)
     })
     this.headline.text = this.headlineFor()
-    const clear = this.verdict() === "clear"
-    this.verdictLine.text = this.verdictText()
+    const results = this.eyeResults()
+    // B7: a My eyes height below 104 cm is named beside the verdict with its own answer.
+    const live = this.liveEye()
+    const clear = G.overallVerdictWithEye(results, live) === "clear"
+    this.verdictLine.text = G.verdictTextWithEye(results, this.eyeNames(), live)
     this.verdictLine.textFill.color = clear ? new vec4(1, 1, 1, 1) : OVERLAP_TEXT
+    // The clear cue: once, on the frame the card turns clear (not at launch, not while it stays clear).
+    const v = clear ? "clear" : "glare"
+    if (v === "clear" && this.cueVerdict === "glare") this.playClearCue()
+    this.cueVerdict = v
     this.sizeAnswerPlate()
+  }
+
+  /** The clear cue's player, beside the answer card (not spatial), quiet by design. */
+  private buildClearCue(): void {
+    const so = global.scene.createSceneObject("Clear cue")
+    so.setParent(this.anchor)
+    const audio = so.createComponent("Component.AudioComponent") as AudioComponent
+    try {
+      audio.audioTrack = requireAsset("../GeneratedSFX/all_three_clear.wav") as AudioTrackAsset
+    } catch (e) {
+      print(`Clear cue: sound not loaded (${e})`)
+      return
+    }
+    audio.volume = CLEAR_CUE_VOLUME
+    this.clearCue = audio
+  }
+
+  private playClearCue(): void {
+    this.cueStats.clearFrame = this.frameNo
+    if (!this.clearCue || !this.clearCue.audioTrack) return
+    this.clearCue.play(1)
+    this.cueStats.plays++
+    this.cueStats.playFrame = this.frameNo
+    this.cueStats.playingAtPlay = this.clearCue.isPlaying()
+  }
+
+  /** The clear cue's player (null when its sound could not be loaded). */
+  clearCueComponent(): AudioComponent | null {
+    return this.clearCue
+  }
+
+  /**
+   * The clear cue so far: how often it played, the frame it last played, the frame the card last
+   * turned clear, and whether it was playing on that frame.
+   */
+  clearCueStats(): {plays: number; playFrame: number; clearFrame: number; playingAtPlay: boolean} {
+    return {...this.cueStats}
+  }
+
+  /** Frames since the Lens opened (the controller's update count). */
+  frameNumber(): number {
+    return this.frameNo
   }
 
   /**
@@ -1494,6 +1628,7 @@ export class GlareZoneController extends BaseScriptComponent {
   private wireUi(): void {
     this.ui.onEyeCycle.add(() => this.cycleEyePreset())
     this.ui.onPaperArt.add((on: boolean) => this.setWorksOnPaper(on))
+    this.ui.onReflector.add((narrow: boolean) => this.setReflector(narrow ? G.RXT13_20 : G.RXT13_40))
     this.ui.onSave.add(() => this.saveLightSheets())
     this.ui.onDone.add(() => this.closeLightSheets())
     this.ui.onRestart.add(() => this.restart())
@@ -1559,6 +1694,7 @@ export class GlareZoneController extends BaseScriptComponent {
   // ===================================================================== per frame
 
   private onUpdate(): void {
+    this.frameNo++
     if (!this.placed) return
     const eye = this.eyeLocal()
     if (this.eyePreset === "my" && Math.abs(eye.y - this.myEyeHeightCm) >= MY_EYES_STEP_CM) {
@@ -1575,12 +1711,21 @@ export class GlareZoneController extends BaseScriptComponent {
     this.updateRings(eye)
     if (this.dirty) {
       this.dirty = false
-      this.rebuildLights()
-      this.rebuildZones()
-      this.rebuildViewingArea()
-      this.rebuildAmber()
+      // The warning fill and status line are rebuilt once, after everything they read
+      // (zones and viewing area), not once per caller (BUILD_LOG B1).
+      this.deferOverlap = true
+      try {
+        this.rebuildLights()
+        this.rebuildZones()
+        this.rebuildViewingArea()
+        this.rebuildAmber()
+      } finally {
+        this.deferOverlap = false
+      }
+      if (this.overlapPending) this.rebuildOverlap()
     }
     this.updateGlareSpot()
+    this.updateSetback()
     if (this.moveOpen && !this.isAdjusting()) this.closeMove()
     const alpha = this.isAdjusting() ? FULL_ALPHA : FAINT_ALPHA
     for (const e of EYES) {
@@ -1595,11 +1740,96 @@ export class GlareZoneController extends BaseScriptComponent {
     if (Math.abs(c.w - a) > 1e-3) m.mainPass.baseColor = new vec4(c.x, c.y, c.z, a)
   }
 
+  /**
+   * Suggest a setback (B5): where along their tracks the lights could hang, toward the wall
+   * from the farthest one, with all three eye heights clear (G.suggestSetbackCm). Solved only
+   * when a move has settled and its inputs changed (about 20 to 30 zone evaluations). The ghost
+   * fixtures and the label show while the answer is glare and the suggestion is toward the
+   * wall; the lights stay where they are. While a tilt or the viewing area is changing, the
+   * last suggestion no longer applies and is hidden; while only a distance changes it stays.
+   */
+  private updateSetback(): void {
+    const aimInputs = this.lights.map((l) => `${l.xCm}|${l.tiltDeg}`).join(";") +
+      `|${this.viewingNearCm}|${this.viewingFarCm}`
+    const inputs = aimInputs + "|" + this.lights.map((l) => `${l.distanceCm}`).join(";")
+    if (inputs !== this.setbackInputs && !this.isAdjusting()) {
+      const t0 = getRealTimeNanos()
+      this.setbackCm = G.suggestSetbackCm(this.lights, this.viewingNearCm, this.viewingFarCm, LAYOUT.viewingHalfWidth)
+      this.setbackSolveMsLast = (getRealTimeNanos() - t0) / 1e6
+      this.setbackInputs = inputs
+      this.setbackAimInputs = aimInputs
+      this.setbackFrom = G.clamp(Math.max(...this.lights.map((l) => l.distanceCm)), G.TRACK_MIN_CM, G.TRACK_MAX_CM)
+      this.placeSetbackMarkers()
+    }
+    const D = this.setbackCm
+    const show = D !== null && aimInputs === this.setbackAimInputs && D < this.setbackFrom - G.SETBACK_TOL_CM &&
+      this.lastVerdict === "glare"
+    for (const m of this.setbackMarkers) m.visual.enabled = show && m.count > 0
+    this.setbackLabelText.getSceneObject().enabled = show
+  }
+
+  private placeSetbackMarkers(): void {
+    const D = this.setbackCm
+    for (let i = 0; i < this.lights.length; i++) {
+      // The fixture's body, on its own track, at the suggested distance.
+      this.setbackMarkers[i].setQuads(D === null ? [] :
+        boxQuads(new vec3(this.lights[i].xCm, G.CEILING_CM - 6, D), new vec3(9, 12, 9)))
+    }
+    if (D === null) return
+    this.setbackLabelText.text = G.setbackLabel(D)
+    // Between the two tracks, under them, tilted down toward the panels' eye point.
+    const y = G.CEILING_CM - SETBACK_LABEL_BELOW_CM
+    const tr = this.setbackLabelText.getSceneObject().getTransform()
+    tr.setLocalPosition(new vec3(0, y, D))
+    const down = Math.atan2(y - this.getEyeHeight(), Math.max(this.follow.z - D, 1))
+    tr.setLocalRotation(quat.angleAxis(down, vec3.right()))
+  }
+
+  /** The suggested setback (cm from the wall), or null when no distance on the track is clear. */
+  setbackSuggestion(): number | null {
+    return this.setbackCm
+  }
+
+  /** True while the setback ghost fixtures and their label are shown. */
+  setbackShown(): boolean {
+    return this.setbackLabelText.getSceneObject().enabled
+  }
+
+  /** The ghost fixtures' centres in the gallery's own space (from their drawn quads). */
+  setbackMarkerCentres(): vec3[] {
+    return this.setbackMarkers.map((m) => {
+      const e = m.extent
+      return e ? e.min.add(e.max).uniformScale(0.5) : new vec3(Number.NaN, Number.NaN, Number.NaN)
+    })
+  }
+
+  /** The setback label as shown ("" while hidden). */
+  setbackLabelShown(): string {
+    return this.setbackShown() ? this.setbackLabelText.text : ""
+  }
+
+  /** How long the last setback solve took (ms). */
+  setbackSolveMs(): number {
+    return this.setbackSolveMsLast
+  }
+
+  /** Angle (deg) between the setback label's front and the direction to the eye (camera). */
+  setbackLabelFacingDeg(): number {
+    const tr = this.setbackLabelText.getSceneObject().getTransform()
+    const front = tr.getWorldRotation().multiplyVec3(vec3.forward()).normalize()
+    const toEye = this.cameraObject.getTransform().getWorldPosition().sub(tr.getWorldPosition()).normalize()
+    return (Math.acos(G.clamp(front.dot(toEye), -1, 1)) * 180) / Math.PI
+  }
+
   private rebuildLights(): void {
     for (let i = 0; i < this.lights.length; i++) {
       const l = this.lights[i]
       const ok = G.lightComputable(l)
       this.fixtures[i].enabled = ok
+      // Only a light that moved or turned is rebuilt: a drag moves one light (BUILD_LOG B1).
+      const built = ok ? G.litGlassSpanKey(l) : "not computable"
+      if (this.lightBuilt[i] === built) continue
+      this.lightBuilt[i] = built
       if (!ok) {
         this.beamMeshes[i].setQuads([])
         this.handleLines[i].setQuads([])
@@ -1613,7 +1843,7 @@ export class GlareZoneController extends BaseScriptComponent {
       const helper = Math.abs(a.y) < 0.9 ? vec3.up() : vec3.right()
       const u = a.cross(helper).normalize()
       const v = a.cross(u).normalize()
-      const half = (G.SAMPLE_BEAM_DEG / 2) * (Math.PI / 180)
+      const half = (G.beamDegOf(l) / 2) * (Math.PI / 180)
       const apex = new vec3(p.x, p.y, p.z)
       const ring: vec3[] = []
       const segs = 28
@@ -1658,7 +1888,7 @@ export class GlareZoneController extends BaseScriptComponent {
     this.zoneRows[key] = rows
     const chosen = this.zoneFilled(key)
     const rects = chosen ? rows : G.zoneOutline(rows, ZONE_ROW_CM, OUTLINE_CM)
-    this.zoneMeshes[key].setQuads(rects.map((r) => rectXZ(r.xMin, r.xMax, r.z0, r.z1, 0)))
+    this.zoneMeshes[key].setRectsXZ(rects, 0)
     this.zoneMeshes[key].visual.setRenderOrder(chosen ? FLOOR_RENDER.chosen : FLOOR_RENDER.outline)
     const label = this.zoneLabels[key]
     label.getSceneObject().enabled = chosen && rows.length > 0
@@ -1671,14 +1901,23 @@ export class GlareZoneController extends BaseScriptComponent {
 
   /** The chosen zone inside the viewing area: the warning fill and the floor's status line. */
   private rebuildOverlap(): void {
+    if (this.deferOverlap) {
+      this.overlapPending = true
+      return
+    }
+    this.overlapPending = false
     const key = this.chosenZone()
     const rows = this.zoneRows[key] || []
     this.overlapRowsNow = G.overlapRows(rows, this.viewingNearCm, this.viewingFarCm, LAYOUT.viewingHalfWidth)
-    this.overlapMesh.setQuads(this.overlapRowsNow.map((r) => rectXZ(r.xMin, r.xMax, r.z0, r.z1, 0)))
+    this.overlapMesh.setRectsXZ(this.overlapRowsNow, 0)
     // "All three: clear" only when every eye height is clear (G.verdictText).
-    const clear = this.verdict() === "clear"
-    this.statusLabel.text = this.verdictText()
-    this.statusLabel.textFill.color = clear ? new vec4(1, 1, 1, 0.95) : OVERLAP_TEXT
+    const results = this.eyeResults()
+    const clear = G.overallVerdict(results) === "clear"
+    this.lastVerdict = clear ? "clear" : "glare"
+    // B7: the floor's line names a My eyes height below 104 cm too, as the answer card does.
+    const live = this.liveEye()
+    this.statusLabel.text = G.verdictTextWithEye(results, this.eyeNames(), live)
+    this.statusLabel.textFill.color = G.overallVerdictWithEye(results, live) === "clear" ? new vec4(1, 1, 1, 0.95) : OVERLAP_TEXT
     this.statusLabel.getSceneObject().enabled = true
     this.layoutFloorLabels()
   }

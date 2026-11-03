@@ -83,7 +83,8 @@ export const LAYOUT = {
   // (LEAF C8), so 4.2 cm (about 2.3 deg).
   sliderKnob: 4.2,
   valueEm: 0.8,
-  paperArtWidth: 8.5,
+  paperArtWidth: 6.5,
+  reflectorWidth: 6.5, // the Reflector toggle beside Paper art (B3)
 
   // Results cards, one per light, in the answer card after "Save results".
   cardWidth: 23,

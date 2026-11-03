@@ -10,12 +10,46 @@ const LAYOUT = [
 
 export type Quad = {a: vec3; b: vec3; c: vec3; d: vec3}
 
-/** A mesh that can be rebuilt every frame from a list of quads and triangles. */
+// Texture coordinates of a quad's corners a, b, c, d.
+const QUAD_UV = [0, 0, 1, 0, 1, 1, 0, 1]
+
+/** A flat rectangle on a horizontal plane: x from xMin to xMax, z (out from the wall) from z0 to z1. */
+export type RectXZ = {xMin: number; xMax: number; z0: number; z1: number}
+
+/** The parts of a rectangle's four vertices that do not depend on its x and z: height, normal up, texture. */
+function writeRectConstants(verts: number[], k: number, y: number): void {
+  for (let c = 0; c < 4; c++, k += 8) {
+    verts[k + 1] = y
+    verts[k + 3] = 0
+    verts[k + 4] = 1
+    verts[k + 5] = 0
+    verts[k + 6] = QUAD_UV[c * 2]
+    verts[k + 7] = QUAD_UV[c * 2 + 1]
+  }
+}
+
+/** Make idx hold exactly n quads' triangle indices (0 1 2, 0 2 3 per quad), writing only new ones. */
+function growQuadIndices(idx: number[], n: number): void {
+  for (let i = idx.length / 6, base = i * 4; i < n; i++, base += 4) {
+    idx.push(base, base + 1, base + 2, base, base + 2, base + 3)
+  }
+  idx.length = n * 6
+}
+
+/**
+ * A mesh that can be rebuilt every frame from a list of quads and triangles.
+ *
+ * Rebuilds run every frame while a light is dragged, so they avoid per-vertex allocations
+ * and repeated vec3 reads (each vec3 component read crosses into the engine): one
+ * preallocated vertex array, the normal read once, the extent taken in the same pass
+ * (BUILD_LOG B1).
+ */
 export class DynamicMesh {
   readonly builder: MeshBuilder
   readonly visual: RenderMeshVisual
   readonly sceneObject: SceneObject
   private quadCount = 0
+  private meshAssigned = false
 
   constructor(parent: SceneObject, name: string, material: Material) {
     this.sceneObject = global.scene.createSceneObject(name)
@@ -30,43 +64,114 @@ export class DynamicMesh {
 
   /** Replace the mesh with these quads (each quad a, b, c, d in order around its edge). */
   setQuads(quads: Quad[], normal: vec3 = vec3.up()): void {
+    const n = quads.length
+    const verts: number[] = new Array(n * 32)
+    const nx = normal.x
+    const ny = normal.y
+    const nz = normal.z
+    let x0 = Infinity, y0 = Infinity, z0 = Infinity
+    let x1 = -Infinity, y1 = -Infinity, z1 = -Infinity
+    let k = 0
+    for (let i = 0; i < n; i++) {
+      const q = quads[i]
+      for (let c = 0; c < 4; c++) {
+        const p = c === 0 ? q.a : c === 1 ? q.b : c === 2 ? q.c : q.d
+        const x = p.x
+        const y = p.y
+        const z = p.z
+        verts[k] = x
+        verts[k + 1] = y
+        verts[k + 2] = z
+        verts[k + 3] = nx
+        verts[k + 4] = ny
+        verts[k + 5] = nz
+        verts[k + 6] = QUAD_UV[c * 2]
+        verts[k + 7] = QUAD_UV[c * 2 + 1]
+        k += 8
+        if (x < x0) x0 = x
+        if (x > x1) x1 = x
+        if (y < y0) y0 = y
+        if (y > y1) y1 = y
+        if (z < z0) z0 = z
+        if (z > z1) z1 = z
+      }
+    }
+    const idx: number[] = []
+    growQuadIndices(idx, n)
+    this.commit(verts, idx, n, x0, y0, z0, x1, y1, z1)
+  }
+
+  /**
+   * Replace the mesh with flat rectangles on the plane at height y, facing up: the same
+   * vertices as setQuads(rects.map((r) => rectXZ(r.xMin, r.xMax, r.z0, r.z1, y))), built
+   * without making four vec3 per rectangle.
+   */
+  setRectsXZ(rects: RectXZ[], y: number): void {
+    const n = rects.length
+    // The arrays are kept between rebuilds (the floor zones are rebuilt on every frame of a
+    // drag): the height, normal, texture and index entries never change for a slot, so a
+    // rebuild writes only each corner's x and z (BUILD_LOG B1).
+    const verts = this.rectVerts
+    if (y !== this.rectY) {
+      this.rectY = y
+      for (let i = 0; i < verts.length / 32; i++) writeRectConstants(verts, i * 32, y)
+    }
+    for (let i = verts.length / 32; i < n; i++) writeRectConstants(verts, i * 32, y)
+    verts.length = n * 32
+    growQuadIndices(this.rectIdx, n)
+    let x0 = Infinity, z0 = Infinity
+    let x1 = -Infinity, z1 = -Infinity
+    for (let i = 0, k = 0; i < n; i++, k += 32) {
+      const r = rects[i]
+      const xa = r.xMin
+      const xb = r.xMax
+      const za = r.z0
+      const zb = r.z1
+      // Corners a, b, c, d of rectXZ: (xMin, z0), (xMax, z0), (xMax, z1), (xMin, z1).
+      verts[k] = xa
+      verts[k + 2] = za
+      verts[k + 8] = xb
+      verts[k + 10] = za
+      verts[k + 16] = xb
+      verts[k + 18] = zb
+      verts[k + 24] = xa
+      verts[k + 26] = zb
+      if (xa < x0) x0 = xa
+      if (xa > x1) x1 = xa
+      if (xb < x0) x0 = xb
+      if (xb > x1) x1 = xb
+      if (za < z0) z0 = za
+      if (za > z1) z1 = za
+      if (zb < z0) z0 = zb
+      if (zb > z1) z1 = zb
+    }
+    this.commit(verts, this.rectIdx, n, x0, y, z0, x1, y, z1)
+  }
+
+  private rectVerts: number[] = []
+  private rectIdx: number[] = []
+  private rectY = Number.NaN
+
+  private commit(verts: number[], idx: number[], n: number, x0: number, y0: number, z0: number, x1: number, y1: number, z1: number): void {
     const vCount = this.builder.getVerticesCount()
     if (vCount > 0) this.builder.eraseVertices(0, vCount)
     const iCount = this.builder.getIndicesCount()
     if (iCount > 0) this.builder.eraseIndices(0, iCount)
-    const verts: number[] = []
-    const idx: number[] = []
-    let base = 0
-    for (const q of quads) {
-      pushVert(verts, q.a, normal, 0, 0)
-      pushVert(verts, q.b, normal, 1, 0)
-      pushVert(verts, q.c, normal, 1, 1)
-      pushVert(verts, q.d, normal, 0, 1)
-      idx.push(base, base + 1, base + 2, base, base + 2, base + 3)
-      base += 4
-    }
-    this.quadCount = quads.length
+    this.quadCount = n
     // The quads' own extent (mesh-local). The visual's AABB is not used for this: it can
     // include the origin, so it overstates a strip that sits away from it.
-    const lo = [Infinity, Infinity, Infinity]
-    const hi = [-Infinity, -Infinity, -Infinity]
-    for (const q of quads) {
-      for (const p of [q.a, q.b, q.c, q.d]) {
-        const v = [p.x, p.y, p.z]
-        for (let k = 0; k < 3; k++) {
-          lo[k] = Math.min(lo[k], v[k])
-          hi[k] = Math.max(hi[k], v[k])
-        }
-      }
-    }
-    this.extentNow = quads.length > 0 ? {min: new vec3(lo[0], lo[1], lo[2]), max: new vec3(hi[0], hi[1], hi[2])} : null
-    if (quads.length > 0) {
+    this.extentNow = n > 0 ? {min: new vec3(x0, y0, z0), max: new vec3(x1, y1, z1)} : null
+    if (n > 0) {
       this.builder.appendVerticesInterleaved(verts)
       this.builder.appendIndices(idx)
       this.builder.updateMesh()
-      this.visual.mesh = this.builder.getMesh()
+      // The builder's mesh stays linked to it, so it is assigned once.
+      if (!this.meshAssigned) {
+        this.visual.mesh = this.builder.getMesh()
+        this.meshAssigned = true
+      }
     }
-    this.visual.enabled = quads.length > 0
+    this.visual.enabled = n > 0
   }
 
   get count(): number {
@@ -79,10 +184,6 @@ export class DynamicMesh {
   get extent(): {min: vec3; max: vec3} | null {
     return this.extentNow
   }
-}
-
-function pushVert(out: number[], p: vec3, n: vec3, u: number, v: number): void {
-  out.push(p.x, p.y, p.z, n.x, n.y, n.z, u, v)
 }
 
 /** Flat rectangle in the local XY plane, centred at (cx, cy), at depth z. */

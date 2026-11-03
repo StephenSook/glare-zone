@@ -14,6 +14,7 @@ import {
   near,
   resetToStandard,
   sampleWhileHeld,
+  SteppedDragInteractor,
 } from "./GlareLeafHelpers"
 
 // Hand values from the brief's geometry check, not from GlareMath: with the whole glass lit
@@ -22,9 +23,14 @@ import {
 const SEATED_FACTOR = 0.91
 const STANDING_FACTOR = 0.4
 const LAG_CM = 1.0
-// A tilt drag moves the aim about 0.3 cm a frame, about 0.5 cm of reach: one frame of lag.
-const TILT_LAG_CM = 1.5
 const MIN_WAYPOINTS = 4
+// The tilt check (B2): the knob moves down in fixed steps and is read after each step, still
+// held, once the Lens has rebuilt, so no lag is allowed; the tolerance covers the hand cone
+// search (0.5 cm grid, about 0.05 cm of reach). With the RXT13's 40 deg reflector (B3) the
+// beam's top leaves the glass top only near 21 deg of tilt, so the steps are 4 cm (6 cm of aim).
+const TILT_STEP_CM = 4.0
+const TILT_STEPS = 22
+const TILT_TOL_CM = 0.15
 
 /** 2. Sliding or tilting a light updates both zones while dragging. */
 @component
@@ -80,10 +86,17 @@ export class GlareC2DragUpdatesZones extends Scenario {
     const sliderDrag = interactor.drag(slider, galleryDir(c, new vec3(0, -0.03, 0)), 800)
     checkWaypoints("slider slide", await sampleWhileHeld(sliderDrag, sliderHeld, read))
 
-    // Tilt: drag the right aim handle down so the beam aims lower; once its top edge drops
-    // below the glass top the zones shrink. At every waypoint both zones match the hand value
-    // for the tilt the light has then: the lit top Y from the beam cone itself (coneLitTopCm,
-    // not GlareMath), then reach = D x (Y - h) / (300 - Y) (the brief's geometry check).
+    // Tilt, at fixed knob positions (B2): the right aim handle is held and moved down in
+    // TILT_STEPS steps of TILT_STEP_CM, one drag update per step, and the Lens is read after
+    // each step while the knob is still held. Before B2 this was a timed drag sampled every
+    // 60 ms, so how far the knob went and how many samples fell past the glass top depended on
+    // the frame rate (2 or 3 of the 3 needed, BUILD_LOG row 10). Now each step k is a known
+    // knob position with a hand value:
+    //   aim point:  150 - 1.5 x TILT_STEP_CM x k (rest aim at the print centre, 150 cm; the
+    //               handle moves the aim 1.5 cm per cm, as the Lens's handle is specified)
+    //   tilt:       atan(sqrt(50^2 + D^2) / (300 - aim)) from straight down
+    //   lit top Y:  from the beam cone itself (coneLitTopCm, not GlareMath)
+    //   reach:      D x (Y - h) / (300 - Y) (the brief's geometry check)
     await isolate()
     const handReach = (D: number, tiltDeg: number, h: number) => {
       const Y = coneLitTopCm(50, D, tiltDeg)
@@ -92,24 +105,39 @@ export class GlareC2DragUpdatesZones extends Scenario {
     // Positive control at rest: the cone lights the glass to its top, so 73.51 and 32.31.
     expect(near(handReach(80.78, c.lights[1].tiltDeg, 109), 73.51, 0.05), "hand seated reach at rest").toBe(true)
     expect(near(handReach(80.78, c.lights[1].tiltDeg, 160), 32.31, 0.05), "hand standing reach at rest").toBe(true)
-    const tiltBefore = c.lights[1].tiltDeg
-    // The beam's top passes the glass top about 2.6 deg below the rest tilt. A 0.2 drag over
-    // 2 s stopped only 0.2 deg past it (2 or 3 samples, by frame timing), so the drag is 0.3
-    // over 3 s: the same speed (same lag), with well over 3 samples past the glass top.
-    const tilt = interactor.drag(handleR, galleryDir(c, new vec3(0, -0.3, 0)), 3000)
-    const tiltSamples = await sampleWhileHeld(tilt, () => knobR.isHeld,
-      () => [c.lights[1].tiltDeg, c.zoneFarEdgeCm("seated"), c.zoneFarEdgeCm("standing"), c.lights[1].distanceCm])
-    expect(tiltSamples.length, "tilt: samples taken while held").toBeGreaterThan(MIN_WAYPOINTS - 1)
+    const D0 = c.lights[1].distanceCm
+    expect(near(D0, 80.78, 0.01), `right light at the standard 80.78 cm (${D0.toFixed(3)})`).toBe(true)
+    const horiz = Math.sqrt(50 * 50 + D0 * D0)
+    const handTilt = (k: number) => (Math.atan2(horiz, 300 - (150 - 1.5 * TILT_STEP_CM * k)) * 180) / Math.PI
+    expect(near(c.lights[1].tiltDeg, handTilt(0), 0.01), `rest tilt ${c.lights[1].tiltDeg.toFixed(3)} vs hand ${handTilt(0).toFixed(3)}`).toBe(true)
+    const stepped = new SteppedDragInteractor("C2 stepped drag")
+    const tiltSamples: number[][] = []
+    const delivered = await stepped.stepDrag(handleR, galleryDir(c, new vec3(0, -TILT_STEP_CM, 0)), TILT_STEPS, (k) => {
+      tiltSamples.push([k, c.lights[1].tiltDeg, c.zoneFarEdgeCm("seated"), c.zoneFarEdgeCm("standing"),
+        c.lights[1].distanceCm, knobR.isHeld ? 1 : 0])
+    })
+    expect(delivered, "tilt: every knob step was delivered").toBe(TILT_STEPS)
+    expect(tiltSamples.length, "tilt: one sample per knob step").toBe(TILT_STEPS)
     let shrinking = 0
-    for (const [t, seated, standing, D] of tiltSamples) {
-      const wantSeated = handReach(D, t, 109)
-      const wantStanding = handReach(D, t, 160)
+    let prevSeated = Infinity
+    for (const [k, t, seated, standing, D, held] of tiltSamples) {
+      const tilt = handTilt(k)
+      const wantSeated = handReach(D0, tilt, 109)
+      const wantStanding = handReach(D0, tilt, 160)
       if (wantSeated < 73.0) shrinking++
-      expect(near(seated, wantSeated, TILT_LAG_CM), `tilt ${t.toFixed(2)}: seated ${seated.toFixed(2)} vs hand ${wantSeated.toFixed(2)}`).toBe(true)
-      expect(near(standing, wantStanding, TILT_LAG_CM), `tilt ${t.toFixed(2)}: standing ${standing.toFixed(2)} vs hand ${wantStanding.toFixed(2)}`).toBe(true)
+      expect(held, `tilt step ${k}: the knob is still held`).toBe(1)
+      expect(near(D, D0, 1e-3), `tilt step ${k}: the light did not slide (${D.toFixed(3)})`).toBe(true)
+      expect(near(t, tilt, 0.01), `tilt step ${k}: tilt ${t.toFixed(3)} vs hand ${tilt.toFixed(3)}`).toBe(true)
+      expect(near(seated, wantSeated, TILT_TOL_CM), `tilt step ${k} (${tilt.toFixed(2)} deg): seated ${seated.toFixed(2)} vs hand ${wantSeated.toFixed(2)}`).toBe(true)
+      expect(near(standing, wantStanding, TILT_TOL_CM), `tilt step ${k} (${tilt.toFixed(2)} deg): standing ${standing.toFixed(2)} vs hand ${wantStanding.toFixed(2)}`).toBe(true)
+      expect(seated <= prevSeated + 1e-6, `tilt step ${k}: seated only shrinks`).toBe(true)
+      prevSeated = seated
     }
-    expect(shrinking, `tilt: ${shrinking} waypoints with the beam's top below the glass top`).toBeGreaterThan(2)
-    expect(c.lights[1].tiltDeg, "tilted down (smaller angle from vertical)").toBeLessThan(tiltBefore - 2)
+    // Hand (40 deg reflector): the beam's top leaves the glass top between steps 15 and 16
+    // (21.60 and 21.12 deg of tilt, aim 60 and 54 cm); steps 16 to 22 (aim 54 to 18 cm) are past it.
+    expect(shrinking, `tilt: ${shrinking} knob positions with the beam's top below the glass top`).toBeGreaterThan(3)
+    print("[C2] tilt at fixed knob positions (step: tilt deg, seated cm, standing cm): " +
+      tiltSamples.map(([k, t, s, st]) => `${k}: ${t.toFixed(3)}, ${s.toFixed(2)}, ${st.toFixed(2)}`).join("; "))
     await resetToStandard(c)
   }
 }
