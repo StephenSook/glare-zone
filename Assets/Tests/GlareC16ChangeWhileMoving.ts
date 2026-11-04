@@ -34,11 +34,14 @@ export class GlareC16ChangeWhileMoving extends Scenario {
     await sleep(300)
     expect(c.isMoveOpen(), "the move is open").toBe(true)
     expect(c.mapLaneText("seated"), "seated change").toBe("Seated 73.5 to 56.4 cm")
-    expect(c.mapLaneText("standing"), "standing change").toBe("Standing 32.3 to 24.8 cm")
+    // Standing is the chosen height: no change line, its distance is the headline's (U1).
+    expect(c.mapLaneText("standing"), "no change line for the chosen height").toBe("")
+    expect(c.headlineText(), "the headline carries Standing while it moves").toBe("Standing: glare up to 24.8 cm (10 in) from the wall")
     expect(c.mapLaneText("child"), "child seated change").toBe("Child seated 77.5 to 59.5 cm")
     // The same numbers as the zones: where they ended when the move began, and now.
     for (const [k, name] of EYES) {
       expect(c.moveStartEnd(k).toFixed(4), `${name}: change starts at the zone end before the move`).toBe(before[k].toFixed(4))
+      if (k === "standing") continue
       expect(c.mapLaneText(k), `${name}: change line from the zones`)
         .toBe(`${name} ${G.oneDecimal(before[k])} to ${G.oneDecimal(c.zoneFarEdgeCm(k))} cm`)
     }
@@ -61,14 +64,14 @@ export class GlareC16ChangeWhileMoving extends Scenario {
     const drag = interactor.drag(handle, galleryDir(c, new vec3(0, 0, -0.3)), 1500)
     // Each sample reads the lines and the zones in the same frame: [lines matching, move open,
     // seated end now].
-    const matches = () => EYES.filter(([k, name]) =>
+    const matches = () => EYES.filter(([k, name]) => k !== "standing" &&
       c.mapLaneText(k) === `${name} ${G.oneDecimal(before[k])} to ${G.oneDecimal(c.zoneFarEdgeCm(k))} cm`).length
     const samples = await sampleWhileHeld(drag, () => knob.isHeld,
       () => [matches(), c.isMoveOpen() ? 1 : 0, c.zoneFarEdgeCm("seated")])
     expect(samples.length, "samples taken while held").toBeGreaterThan(3)
     let changed = 0
     for (const [m, open, seated] of samples) {
-      expect(m, `all three lines match the zone ends while held (seated now ${seated.toFixed(2)})`).toBe(3)
+      expect(m, `both other heights' lines match the zone ends while held (seated now ${seated.toFixed(2)})`).toBe(2)
       expect(open, "move open while held").toBe(1)
       if (Math.abs(seated - before["seated"]) > 0.05) changed++
     }

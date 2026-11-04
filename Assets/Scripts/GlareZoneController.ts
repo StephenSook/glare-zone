@@ -103,6 +103,23 @@ const SETBACK_LABEL_BELOW_CM = 22 // under the tracks, between the two ghost fix
 // answer holds for flat glass in this room's sizes, so "All three: clear" is not a promise
 // about every room.
 const DISCLAIMER = "Computed for flat glass in this room; manufacturer lamp data, not measured"
+// G1: the floor's soft patch per lamp (each lamp's own lobe of the chosen eye height's zone,
+// drawn twice: its rows, and its rows widened by a feather, so the edge is soft), how far a
+// frame may lean forward, and the warning fill's flash (alpha between these, at this rate).
+const LOBE_FEATHER_CM = 4
+const LOBE_ALPHA_SCALE = 0.45
+export const FRAME_LEAN_MAX_DEG = 15
+// U1b item 5: each lamp's beam angle (its axis from the horizontal), shown live under its aim
+// handle. CCI Notes 2/3 (Track Lighting) aims the beam at 60 deg to the horizontal; steeper than
+// that the label turns amber: frame shadows and exaggerated texture, the trade-off ERCO describes
+// for lights under 30 deg from vertical.
+export const CCI_BEAM_DEG = 60
+const BEAM_LABEL_BELOW_CM = 9 // under the aim handle's knob
+const BEAM_LABEL_OK = new vec4(1, 1, 1, 0.9)
+const BEAM_LABEL_WARN = new vec4(1.0, 0.6, 0.05, 1)
+const OVERLAP_FLASH_MIN = 0.72
+const OVERLAP_FLASH_MAX = 0.95
+const OVERLAP_FLASH_HZ = 1.25
 // The clear cue's volume: a quiet confirmation (the WAV itself is peak-normalized).
 const CLEAR_CUE_VOLUME = 0.35
 
@@ -248,6 +265,20 @@ export class GlareZoneController extends BaseScriptComponent {
   private cueVerdict: "clear" | "glare" | "" = ""
   private cueStats = {plays: 0, playFrame: -1, clearFrame: -1, playingAtPlay: false}
   private frameNo = 0
+  // G1: the model's room. The 3D footprint (each lamp mirrored through the glass plane, which
+  // may lean forward) is on; setFootprint3D(false) goes back to the side-view reference.
+  private room: G.Room = {...G.DEFAULT_ROOM, footprint: "3d", leanDeg: 0}
+  private printObj!: SceneObject
+  private lobeMeshes: DynamicMesh[] = []
+  private lobeMats: Material[] = []
+  private lobeRowsChosen: G.ZoneRow[][] = []
+  private overlapMat!: Material
+  private beamLabels: Text[] = []
+  private beamAngles: number[] = []
+  // G2: the wheelchair coverage estimate on the answer card (solved when a change settles).
+  private wheelchairLine!: Text
+  private wheelchairInputs = ""
+  private wheelchairNow: {share: number; boundaryCm: number} | null = null
 
   onAwake(): void {
     print(`Lens Opened: ${LENS_VERSION}`)
@@ -409,6 +440,59 @@ export class GlareZoneController extends BaseScriptComponent {
     this.dirty = true
   }
 
+  /** G1: the 3D footprint on (the default) or off (the side-view reference). */
+  setFootprint3D(on: boolean): void {
+    this.room = {...this.room, footprint: on ? "3d" : "2d"}
+    this.dirty = true
+  }
+
+  footprint3D(): boolean {
+    return this.room.footprint === "3d"
+  }
+
+  /** G1: the frame's forward lean (deg, 0 to FRAME_LEAN_MAX_DEG); the print turns about the glass's bottom edge. */
+  setFrameLeanDeg(deg: number): void {
+    const lean = G.clamp(Number.isFinite(deg) ? deg : 0, 0, FRAME_LEAN_MAX_DEG)
+    this.room = {...this.room, leanDeg: lean}
+    const r = quat.angleAxis((lean * Math.PI) / 180, vec3.right())
+    const pivot = new vec3(0, G.GLASS_BOTTOM_CM, 0)
+    const t = this.printObj.getTransform()
+    t.setLocalRotation(r)
+    t.setLocalPosition(pivot.sub(r.multiplyVec3(pivot)))
+    this.glarePoints = []
+    this.dirty = true
+  }
+
+  frameLeanDeg(): number {
+    return this.room.leanDeg ?? 0
+  }
+
+  /** The model's room as the zones use it (a copy). */
+  modelRoom(): G.Room {
+    return {...this.room}
+  }
+
+  /** G1: each lamp's own rows (its lobe) for the chosen eye height, as drawn. */
+  lobeRows(): G.ZoneRow[][] {
+    return this.lobeRowsChosen.map((r) => r.slice())
+  }
+
+  /** G1: how many rectangles each lamp's soft patch draws (0 when hidden). */
+  lobePatchCounts(): number[] {
+    return this.lobeMeshes.map((m) => (m.visual.enabled ? m.count : 0))
+  }
+
+  /** G1: the warning fill's alpha now (it flashes while it shows). */
+  overlapAlpha(): number {
+    return this.overlapMat.mainPass.baseColor.w
+  }
+
+  /** G1: the print's lean as drawn: the angle its up direction turned toward the room (deg). */
+  printLeanDeg(): number {
+    const up = this.printObj.getTransform().getLocalRotation().multiplyVec3(vec3.up())
+    return (Math.atan2(up.z, up.y) * 180) / Math.PI
+  }
+
   getViewingArea(): G.Interval {
     return {min: this.viewingNearCm, max: this.viewingFarCm}
   }
@@ -433,8 +517,8 @@ export class GlareZoneController extends BaseScriptComponent {
         lines.push(`${eye.label}, eyes ${eye.heightCm} cm: FAIL, cannot be computed`)
         continue
       }
-      const pass = G.passesViewingArea(l, eye.heightCm, this.viewingNearCm, this.viewingFarCm, LAYOUT.viewingHalfWidth)
-      const depth = G.zoneDepth(l, eye.heightCm)
+      const pass = G.passesViewingArea(l, eye.heightCm, this.viewingNearCm, this.viewingFarCm, LAYOUT.viewingHalfWidth, this.room)
+      const depth = G.zoneDepthFor(l, eye.heightCm, this.room)
       const reach = depth ? `glare to ${G.oneDecimal(depth.max)} cm` : "no glare"
       lines.push(`${eye.label}, eyes ${eye.heightCm} cm: ${pass ? "PASS" : "FAIL"}, ${reach}`)
     }
@@ -996,6 +1080,7 @@ export class GlareZoneController extends BaseScriptComponent {
     // The glazed print: frame, a plain sample image and its label.
     const print = global.scene.createSceneObject("Sample print (stand-in)")
     print.setParent(this.wall)
+    this.printObj = print
     this.staticMesh(print, "Frame", new vec4(0.82, 0.76, 0.62, 1), boxQuads(new vec3(0, 150, -0.2), new vec3(110, 110, 1.6)))
     this.staticMesh(print, "Mat", new vec4(0.92, 0.9, 0.86, 1), [rectXY(0, 150, 100, 100, 0.7)], vec3.forward())
     this.staticMesh(print, "Image", new vec4(0.42, 0.55, 0.68, 1), [
@@ -1025,6 +1110,12 @@ export class GlareZoneController extends BaseScriptComponent {
       this.setbackMarkers.push(marker)
     }
     this.setbackLabelText = makeText(this.gallery, "Setback label", "", LAYOUT.smallEm * 2, SETBACK_LABEL_COLOR)
+    for (let i = 0; i < this.lights.length; i++) {
+      const t = makeText(this.wall, `Beam angle ${i === 0 ? "L" : "R"}`, "", LAYOUT.smallEm * 0.8, BEAM_LABEL_OK)
+      t.getSceneObject().enabled = false
+      this.beamLabels.push(t)
+      this.beamAngles.push(Number.NaN)
+    }
     this.setbackLabelText.getSceneObject().enabled = false
 
     // Eye-height marks on the wall either side of the print, in each eye height's colour
@@ -1069,7 +1160,17 @@ export class GlareZoneController extends BaseScriptComponent {
 
     // Where the chosen zone reaches into the viewing area: a bright warning fill and a status
     // line ("Seated: glare inside the viewing area", or "Seated: clear").
+    // G1: a soft patch per lamp for the chosen eye height, under its zone.
+    for (let i = 0; i < this.lights.length; i++) {
+      const mat = this.mat(new vec4(1, 1, 1, 0.2))
+      this.lobeMats.push(mat)
+      const lobe = new DynamicMesh(this.floor, `Lamp patch ${i === 0 ? "L" : "R"}`, mat)
+      lobe.sceneObject.getTransform().setLocalPosition(new vec3(0, 0.4, 0))
+      lobe.visual.setRenderOrder(FLOOR_RENDER.outline)
+      this.lobeMeshes.push(lobe)
+    }
     this.overlapMesh = new DynamicMesh(this.floor, "Glare inside the viewing area", this.mat(OVERLAP_COLOR))
+    this.overlapMat = this.overlapMesh.visual.mainMaterial
     this.overlapMesh.visual.setRenderOrder(FLOOR_RENDER.overlap)
     this.overlapMesh.sceneObject.getTransform().setLocalPosition(new vec3(0, 0.7, 0))
     this.statusLabel = this.floorLabel(this.floor, "Floor status label", OVERLAP_TEXT)
@@ -1077,7 +1178,8 @@ export class GlareZoneController extends BaseScriptComponent {
     this.viewingLabel = this.floorLabel(this.floor, "Viewing area label", new vec4(1, 1, 1, 0.95))
 
     // Overlays on the glass: amber light-limit cells, the glare spot and its labels.
-    this.amberMesh = new DynamicMesh(this.wall, "Amber over 50 lux", this.mat(AMBER))
+    // On the print, so the cells lean with its glass (G1).
+    this.amberMesh = new DynamicMesh(this.printObj, "Amber over 50 lux", this.mat(AMBER))
     // A warm halo so the spot still reads against the light mat in the preview.
     this.spotOuter = new DynamicMesh(this.wall, "Glare spot halo", this.mat(new vec4(1, 0.78, 0.3, 0.75)))
     this.spotInner = new DynamicMesh(this.wall, "Glare spot", this.mat(new vec4(1, 1, 0.97, 0.95)))
@@ -1386,6 +1488,11 @@ export class GlareZoneController extends BaseScriptComponent {
     this.disclaimer = this.cardTextAt(this.answerCard, "Disclaimer", DISCLAIMER, LAYOUT.disclaimerEm,
       new vec4(1, 1, 1, 0.85), HorizontalAlignment.Center, 0, DISCLAIMER_Y, W - 2, 500)
     this.disclaimer.horizontalOverflow = HorizontalOverflow.Shrink
+    // G2: "About N% of wheelchair users see glare here (estimate)", bottom left (sizeAnswerPlate places it).
+    this.wheelchairLine = this.cardTextAt(this.answerCard, "Wheelchair estimate", "", LAYOUT.versionEm,
+      new vec4(1, 1, 1, 0.85), HorizontalAlignment.Left, -W / 2 + 0.7, -H / 2 + 1.1, W - 12, 500)
+    this.wheelchairLine.horizontalOverflow = HorizontalOverflow.Shrink
+    this.wheelchairLine.getSceneObject().enabled = false
     this.versionLabel = this.cardTextAt(this.answerCard, "Version", LENS_VERSION, LAYOUT.versionEm,
       new vec4(1, 1, 1, 0.7), HorizontalAlignment.Right, W / 2 - 0.7, -H / 2 + 1.1, 8, 500)
 
@@ -1459,12 +1566,20 @@ export class GlareZoneController extends BaseScriptComponent {
     this.legendViewing.setQuads([], vec3.forward())
     this.legendFooter.enabled = false
     this.legend.enabled = this.moveOpen && this.cardCount() === 0
+    // U1: each glare distance once on screen. The chosen eye height's distance is the headline's,
+    // so its change line is not shown; the other lines close up under the disclosure.
+    const chosen = this.chosenZone()
+    let row = 0
     LANES.forEach((key) => {
       this.legendBars[key].setQuads([], vec3.forward())
       const label = this.legendLaneTexts[key]
-      const show = key !== "my" || this.eyePreset === "my"
+      const show = (key !== "my" || this.eyePreset === "my") && key !== chosen
       label.getSceneObject().enabled = show
-      if (show) label.text = this.moveOpen ? this.changeLine(key) : this.laneLine(key)
+      if (show) {
+        label.text = this.moveOpen ? this.changeLine(key) : this.laneLine(key)
+        label.getSceneObject().getTransform().setLocalPosition(new vec3(LEGEND_TEXT_X, this.laneY(row), 0.15))
+        row++
+      }
     })
     this.headline.text = this.headlineFor()
     const results = this.eyeResults()
@@ -1534,6 +1649,9 @@ export class GlareZoneController extends BaseScriptComponent {
     if (Math.abs(this.answerPlate.size.y - H) > 1e-3) this.answerPlate.size = new vec2(LAYOUT.answerWidth, H)
     this.answerBacking.getTransform().setLocalPosition(new vec3(0, top - H / 2, -0.3))
     this.versionLabel.getSceneObject().getTransform().setLocalPosition(new vec3(LAYOUT.answerWidth / 2 - 0.7, top - H + 1.1, 0.15))
+    if (this.wheelchairLine) {
+      this.wheelchairLine.getSceneObject().getTransform().setLocalPosition(new vec3(-LAYOUT.answerWidth / 2 + 0.7, top - H + 1.1, 0.15))
+    }
   }
 
   /** The verdict line on the answer card ("All three: clear", or the glare list). */
@@ -1726,6 +1844,7 @@ export class GlareZoneController extends BaseScriptComponent {
     }
     this.updateGlareSpot()
     this.updateSetback()
+    this.updateWheelchair()
     if (this.moveOpen && !this.isAdjusting()) this.closeMove()
     const alpha = this.isAdjusting() ? FULL_ALPHA : FAINT_ALPHA
     for (const e of EYES) {
@@ -1733,6 +1852,13 @@ export class GlareZoneController extends BaseScriptComponent {
       this.setAlpha(this.bandMats[e.key], alpha + 0.2)
     }
     this.setAlpha(this.zoneMats["my"], Math.max(alpha, 0.35))
+    for (const m of this.lobeMats) this.setAlpha(m, alpha * LOBE_ALPHA_SCALE)
+    // G1: the warning fill flashes while it shows (never under OVERLAP_FLASH_MIN, so it stays bright).
+    if (this.overlapRowsNow.length > 0) {
+      const k = 0.5 + 0.5 * Math.sin(getTime() * Math.PI * 2 * OVERLAP_FLASH_HZ)
+      const c = this.overlapMat.mainPass.baseColor
+      this.overlapMat.mainPass.baseColor = new vec4(c.x, c.y, c.z, OVERLAP_FLASH_MIN + (OVERLAP_FLASH_MAX - OVERLAP_FLASH_MIN) * k)
+    }
   }
 
   private setAlpha(m: Material, a: number): void {
@@ -1750,11 +1876,12 @@ export class GlareZoneController extends BaseScriptComponent {
    */
   private updateSetback(): void {
     const aimInputs = this.lights.map((l) => `${l.xCm}|${l.tiltDeg}`).join(";") +
-      `|${this.viewingNearCm}|${this.viewingFarCm}`
+      `|${this.viewingNearCm}|${this.viewingFarCm}|${this.room.footprint}|${this.room.leanDeg}`
     const inputs = aimInputs + "|" + this.lights.map((l) => `${l.distanceCm}`).join(";")
     if (inputs !== this.setbackInputs && !this.isAdjusting()) {
       const t0 = getRealTimeNanos()
-      this.setbackCm = G.suggestSetbackCm(this.lights, this.viewingNearCm, this.viewingFarCm, LAYOUT.viewingHalfWidth)
+      this.setbackCm = G.suggestSetbackCm(this.lights, this.viewingNearCm, this.viewingFarCm, LAYOUT.viewingHalfWidth,
+        G.VERDICT_HEIGHTS, this.room)
       this.setbackSolveMsLast = (getRealTimeNanos() - t0) / 1e6
       this.setbackInputs = inputs
       this.setbackAimInputs = aimInputs
@@ -1783,6 +1910,79 @@ export class GlareZoneController extends BaseScriptComponent {
     tr.setLocalPosition(new vec3(0, y, D))
     const down = Math.atan2(y - this.getEyeHeight(), Math.max(this.follow.z - D, 1))
     tr.setLocalRotation(quat.angleAxis(down, vec3.right()))
+  }
+
+  /**
+   * G2: the wheelchair coverage estimate (G.wheelchairGlareShare on the zones' own model), solved
+   * when a change has settled and its inputs changed. Shown on the answer card at rest (not while
+   * a light moves, not over the results cards), always labelled as an estimate.
+   */
+  private updateWheelchair(): void {
+    const inputs = this.lights.map((l) => `${l.xCm}|${l.distanceCm}|${l.tiltDeg}|${l.beamDeg}`).join(";") +
+      `|${this.viewingNearCm}|${this.viewingFarCm}|${this.room.footprint}|${this.room.leanDeg}`
+    if (inputs !== this.wheelchairInputs && !this.isAdjusting()) {
+      this.wheelchairNow = G.wheelchairGlareShare(this.lights, this.viewingNearCm, this.viewingFarCm,
+        LAYOUT.viewingHalfWidth, this.room)
+      this.wheelchairInputs = inputs
+      if (this.wheelchairNow) this.wheelchairLine.text = G.wheelchairReadout(this.wheelchairNow.share)
+    }
+    const show = this.wheelchairNow !== null && inputs === this.wheelchairInputs && !this.moveOpen && this.cardCount() === 0
+    if (this.wheelchairLine.getSceneObject().enabled !== show) this.wheelchairLine.getSceneObject().enabled = show
+  }
+
+  /** G2: the estimated share (0 to 1) of wheelchair users who see glare in the viewing area, or null. */
+  wheelchairShare(): number | null {
+    return this.wheelchairNow ? this.wheelchairNow.share : null
+  }
+
+  /** G2: the eye height (cm) at and below which a wheelchair user sees glare in the viewing area, or null. */
+  wheelchairBoundaryCm(): number | null {
+    return this.wheelchairNow ? this.wheelchairNow.boundaryCm : null
+  }
+
+  /** G2: the estimate line on the answer card as shown ("" while hidden). */
+  wheelchairLineText(): string {
+    return this.wheelchairLine.getSceneObject().isEnabledInHierarchy ? this.wheelchairLine.text : ""
+  }
+
+  wheelchairLineComponent(): Text {
+    return this.wheelchairLine
+  }
+
+  /**
+   * U1b item 5: lamp i's beam angle, its axis from the horizontal (90 - tilt from straight down),
+   * live, under that lamp's aim handle (the control that changes it); amber past CCI's 60 deg.
+   */
+  private placeBeamLabel(i: number): void {
+    const deg = 90 - this.lights[i].tiltDeg
+    this.beamAngles[i] = deg
+    const t = this.beamLabels[i]
+    t.text = `Beam ${Math.round(deg)} deg`
+    t.textFill.color = Math.round(deg) > CCI_BEAM_DEG ? BEAM_LABEL_WARN : BEAM_LABEL_OK
+    const side = i === 0 ? -1 : 1
+    t.getSceneObject().getTransform().setLocalPosition(new vec3(side * LAYOUT.handleX, LAYOUT.handleY - BEAM_LABEL_BELOW_CM, LAYOUT.knobOut))
+    t.getSceneObject().enabled = true
+  }
+
+  /** U1b item 5: lamp i's beam angle from the horizontal (deg); NaN when it cannot be computed. */
+  beamAngleDeg(i: number): number {
+    return this.beamAngles[i]
+  }
+
+  /** U1b item 5: lamp i's angle label as shown ("" while hidden). */
+  beamLabelText(i: number): string {
+    const t = this.beamLabels[i]
+    return t.getSceneObject().isEnabledInHierarchy ? t.text : ""
+  }
+
+  /** U1b item 5: true while lamp i's angle label shows the warning colour (steeper than CCI's 60 deg). */
+  beamLabelWarns(i: number): boolean {
+    const c = this.beamLabels[i].textFill.color
+    return Math.abs(c.x - BEAM_LABEL_WARN.x) + Math.abs(c.y - BEAM_LABEL_WARN.y) + Math.abs(c.z - BEAM_LABEL_WARN.z) < 1e-3
+  }
+
+  beamLabelComponent(i: number): Text {
+    return this.beamLabels[i]
   }
 
   /** The suggested setback (cm from the wall), or null when no distance on the track is clear. */
@@ -1833,8 +2033,11 @@ export class GlareZoneController extends BaseScriptComponent {
       if (!ok) {
         this.beamMeshes[i].setQuads([])
         this.handleLines[i].setQuads([])
+        this.beamAngles[i] = Number.NaN
+        this.beamLabels[i].getSceneObject().enabled = false
         continue
       }
+      this.placeBeamLabel(i)
       const p = G.lightPosition(l)
       this.fixtures[i].getTransform().setLocalPosition(new vec3(p.x, p.y, p.z))
       // Beam: a faint cone from the fixture to where it meets the wall plane.
@@ -1875,14 +2078,14 @@ export class GlareZoneController extends BaseScriptComponent {
 
   /**
    * One eye height's floor zone: filled when it is the chosen eye height, a faint outline
-   * otherwise. Only the chosen zone carries its reach label ("Seated: glare up to 73.5 cm
-   * from the wall"); the answer card's legend lists every height's reach at once.
+   * otherwise. Only the chosen zone carries a label, its name in its colour ("Seated"); its
+   * distance is the answer card's headline (U1: each glare distance once on screen).
    */
   private rebuildZone(key: ZoneKey): void {
     const active = key !== "my" || this.eyePreset === "my"
     const h = this.zoneHeight(key)
     const computable = this.lights.every((l) => G.lightComputable(l)) && Number.isFinite(h)
-    let rows = active && computable ? G.combinedZoneRows(this.lights, h, ZONE_ROW_CM) : []
+    let rows = active && computable ? G.combinedZoneRows(this.lights, h, ZONE_ROW_CM, this.room) : []
     this.zoneBad[key] = active && (!computable || !G.rowsComputable(rows))
     if (this.zoneBad[key]) rows = []
     this.zoneRows[key] = rows
@@ -1890,13 +2093,33 @@ export class GlareZoneController extends BaseScriptComponent {
     const rects = chosen ? rows : G.zoneOutline(rows, ZONE_ROW_CM, OUTLINE_CM)
     this.zoneMeshes[key].setRectsXZ(rects, 0)
     this.zoneMeshes[key].visual.setRenderOrder(chosen ? FLOOR_RENDER.chosen : FLOOR_RENDER.outline)
+    if (chosen) this.rebuildLobes(key, h, rows.length > 0)
     const label = this.zoneLabels[key]
     label.getSceneObject().enabled = chosen && rows.length > 0
     if (rows.length > 0) {
       const name = key === "my" ? `${MY_EYES_LABEL} (${Math.round(this.myEyeHeightCm)} cm)` : this.zoneName(key)
-      label.text = `${name}: glare up to ${G.oneDecimal(G.zoneFarEdge(rows))} cm from the wall`
+      // U1: the colour tag only; the distance is the answer card's headline (each distance once on screen).
+      label.text = name
     }
     if (chosen) this.rebuildOverlap()
+  }
+
+  /**
+   * G1: each lamp's own part of the chosen eye height's zone, as a soft patch: its rows, and
+   * the same rows widened by LOBE_FEATHER_CM, in one mesh, so the patch fades at its edge.
+   * Where the two lamps' patches overlap, the floor is brighter.
+   */
+  private rebuildLobes(key: ZoneKey, h: number, any: boolean): void {
+    this.lobeRowsChosen = any ? G.lobeRows(this.lights, h, ZONE_ROW_CM, this.room) : this.lights.map(() => [])
+    const f = LOBE_FEATHER_CM
+    const c = this.zoneColor(key)
+    for (let i = 0; i < this.lobeMeshes.length; i++) {
+      const rows = this.lobeRowsChosen[i] || []
+      const soft = rows.map((r) => ({z0: Math.max(0, r.z0 - f / 2), z1: r.z1 + f / 2, xMin: r.xMin - f, xMax: r.xMax + f}))
+      this.lobeMeshes[i].setRectsXZ(rows.concat(soft), 0)
+      const m = this.lobeMats[i].mainPass.baseColor
+      this.lobeMats[i].mainPass.baseColor = new vec4(c.x, c.y, c.z, m.w)
+    }
   }
 
   /** The chosen zone inside the viewing area: the warning fill and the floor's status line. */
@@ -1988,7 +2211,8 @@ export class GlareZoneController extends BaseScriptComponent {
       for (let x = -half; x < half - 1e-6; x += AMBER_CELL_CM) {
         for (let y = G.GLASS_BOTTOM_CM; y < G.GLASS_TOP_CM - 1e-6; y += AMBER_CELL_CM) {
           const c = {x: x + AMBER_CELL_CM / 2, y: y + AMBER_CELL_CM / 2, z: 0}
-          if (G.totalIlluminanceLux(this.lights.filter((l) => G.lightComputable(l)), c) > G.WORKS_ON_PAPER_LUX) {
+          const onGlass = G.glassPoint(c.y - G.GLASS_BOTTOM_CM, c.x, this.room)
+          if (G.totalIlluminanceLux(this.lights.filter((l) => G.lightComputable(l)), onGlass, this.room) > G.WORKS_ON_PAPER_LUX) {
             quads.push(rectXY(c.x, c.y, AMBER_CELL_CM, AMBER_CELL_CM, 1.0))
             centres.push({x: c.x, y: c.y})
           }
@@ -2012,17 +2236,18 @@ export class GlareZoneController extends BaseScriptComponent {
   private updateGlareSpot(): void {
     const e = this.eyeLocal()
     const eye = {x: e.x, y: e.y, z: e.z}
-    const byLight = this.lights.map((l) => (G.lightComputable(l) ? G.glarePoint(eye, l) : null))
+    const byLight = this.lights.map((l) => (G.lightComputable(l) ? G.glarePointFor(eye, l, this.room) : null))
     const pts = byLight.filter((p) => p !== null) as G.V3[]
     const changed = pts.length !== this.glarePoints.length ||
-      pts.some((p, i) => Math.abs(p.x - this.glarePoints[i].x) + Math.abs(p.y - this.glarePoints[i].y) > 0.05)
+      pts.some((p, i) => Math.abs(p.x - this.glarePoints[i].x) + Math.abs(p.y - this.glarePoints[i].y) +
+        Math.abs(p.z - this.glarePoints[i].z) > 0.05)
     this.glarePoints = pts
     if (changed) {
       const outer: Quad[] = []
       const inner: Quad[] = []
       for (const p of pts) {
-        outer.push(...discQuads(p.x, p.y, 4, 1.2))
-        inner.push(...discQuads(p.x, p.y, 2, 1.3))
+        outer.push(...discQuads(p.x, p.y, 4, p.z + 1.2))
+        inner.push(...discQuads(p.x, p.y, 2, p.z + 1.3))
       }
       this.spotOuter.setQuads(outer, vec3.forward())
       this.spotInner.setQuads(inner, vec3.forward())
@@ -2036,7 +2261,7 @@ export class GlareZoneController extends BaseScriptComponent {
       t.getSceneObject().enabled = p !== null
       if (p) {
         t.text = `${name}: glare here`
-        t.getSceneObject().getTransform().setLocalPosition(new vec3(p.x, p.y + SPOT_LABEL_ABOVE_CM, 1.6))
+        t.getSceneObject().getTransform().setLocalPosition(new vec3(p.x, p.y + SPOT_LABEL_ABOVE_CM, p.z + 1.6))
       }
     }
     this.updateGhost(e, byLight)
@@ -2062,9 +2287,9 @@ export class GlareZoneController extends BaseScriptComponent {
           this.ghostRays[i].setQuads([])
           continue
         }
-        const g = G.mirroredLamp(this.lights[i])
+        const g = G.mirroredLampFor(this.lights[i], this.room)
         const ghost = new vec3(g.x, g.y, g.z)
-        const spot = new vec3(p.x, p.y, 1.4)
+        const spot = new vec3(p.x, p.y, p.z + 1.4)
         const lamp = G.lightPosition(this.lights[i])
         this.ghostLamps[i].setQuads(boxQuads(new vec3(ghost.x, ghost.y - 6, ghost.z), new vec3(9, 12, 9)))
         // The lamp's own ray down to the glare spot: the light path, lamp to glass to you.

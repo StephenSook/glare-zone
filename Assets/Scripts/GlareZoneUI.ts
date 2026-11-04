@@ -117,7 +117,7 @@ export class GlareZoneUI extends BaseScriptComponent {
   onAwake(): void {
     this.sceneObject.createComponent("Component.Canvas")
     this.mainRow = this.buildRow("Main buttons", 0, [
-      {name: "Eye height button", label: "Eye height: Standing", hint: "click to change", width: 14},
+      {name: "Eye height button", label: "Eye height: Standing", hint: "pinch to change", width: 14},
       {name: "Save results button", label: "Save results", width: 9.5},
       {name: "More button", label: "More controls", width: 9.5},
     ])

@@ -33,12 +33,12 @@ export class GlareC1ZonesAppear extends Scenario {
     // and carries its reach; the others are faint outlines (the legend lists every reach).
     expect(c.zoneFilled("standing"), "Standing zone filled (chosen)").toBe(true)
     expect(c.zoneFilled("seated"), "Seated zone an outline").toBe(false)
-    expect(c.zoneLabelText("standing")).toBe("Standing: glare up to 32.3 cm from the wall")
+    expect(c.zoneLabelText("standing"), "the floor label is the colour tag; the distance is the headline's (U1)").toBe("Standing")
     expect(c.zoneLabelText("seated"), "no reach label on an outline").toBe("")
     c.setEyePreset("seated")
     await sleep(300)
     expect(c.zoneFilled("seated"), "Seated zone filled when chosen").toBe(true)
-    expect(c.zoneLabelText("seated")).toBe("Seated: glare up to 73.5 cm from the wall")
+    expect(c.zoneLabelText("seated")).toBe("Seated")
     c.setEyePreset("standing")
     await sleep(300)
     // Item D: at rest the card is one line plus the verdict; no map and no per-height lines.
@@ -50,7 +50,7 @@ export class GlareC1ZonesAppear extends Scenario {
     expect(c.headlineText(), "the one line").toBe("Standing: glare up to 32.3 cm (1 ft 1 in) from the wall")
     expect(c.verdictLineText(), "the verdict").toBe("Glare in the viewing area: Seated, Child seated")
     expect(c.disclaimerText(), "disclosure").toBe("Computed for flat glass in this room; manufacturer lamp data, not measured")
-    expect(c.versionText(), "version shown").toBe("v0.4")
+    expect(c.versionText(), "version shown").toBe("v0.5")
     // The unexplained "You" marker is gone from the map. Positive control: the same lookup
     // finds a map label that does exist.
     expect(findSceneObjectByName("Map wall label") !== undefined, "lookup finds an existing map label").toBe(true)

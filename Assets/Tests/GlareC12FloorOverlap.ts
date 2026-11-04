@@ -54,7 +54,7 @@ export class GlareC12FloorOverlap extends Scenario {
     expect(c.zoneQuadCount("standing") > 5 && c.zoneQuadCount("child") > 5, "outlines drawn").toBe(true)
     const so = c.zoneRenderOrder("seated")
     expect(so > c.zoneRenderOrder("standing") && so > c.zoneRenderOrder("child"), `Seated zone drawn on top (${so})`).toBe(true)
-    expect(c.zoneLabelText("seated"), "Seated reach on the floor").toBe("Seated: glare up to 73.5 cm from the wall")
+    expect(c.zoneLabelText("seated"), "Seated named on the floor (its distance is the headline's, U1)").toBe("Seated")
     expect(c.zoneLabelText("child"), "no reach label on an outline").toBe("")
 
     expect(c.overlapVisible(), "glare inside the viewing area shown at the standard placement").toBe(true)
@@ -100,7 +100,7 @@ export class GlareC12FloorOverlap extends Scenario {
     expect(c.overlapVisible(), "no glare inside the viewing area at 62 cm").toBe(false)
     expect(c.overlapDepth().max, "no overlap depth at 62 cm").toBe(0)
     expect(c.floorStatusText(), "status line at 62 cm").toBe("All three: clear")
-    expect(c.zoneLabelText("seated")).toBe("Seated: glare up to 56.4 cm from the wall")
+    expect(c.zoneLabelText("seated")).toBe("Seated")
 
     // At Standing (standard placement) the standing zone (32.31 cm) stays out of the area, but
     // seated and child seated reach in, so the status is not clear.

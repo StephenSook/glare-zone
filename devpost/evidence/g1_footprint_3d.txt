@@ -1,0 +1,50 @@
+G1: the 3D reflection footprint (plane-mirror test on the floor), 2026-11-03.
+
+What it is (Assets/Scripts/GlareMath.ts, section "G1: the 3D footprint"):
+- Each lamp is mirrored through the glass plane itself (mirroredLamp3D). The plane may lean forward
+  about the glass's bottom edge (Room.leanDeg). An eye on the floor grid glares where the line
+  to that image crosses the lit part of the glass rectangle (glarePoint3D). zoneRows3D gives, for each
+  2 cm floor row, the x range of eye positions that see each lamp, so a zone has width as well as
+  depth; lobeRows keeps each lamp's rows apart (two lamps, two lobes); combinedZoneRows merges them
+  and keeps two pieces where the lobes part.
+- The side-view functions (zoneRows, zoneDepth, glarePoint, mirroredLamp) are kept unchanged as the
+  reference. The switch is Room.footprint: "3d" uses the new path, "2d" (and the unit tests' default
+  room) the reference. In the Lens: GlareZoneController.setFootprint3D(true/false); 3D is on.
+- The frame's lean: GlareZoneController.setFrameLeanDeg(0 to 15). The print (and its amber cells)
+  turns about the glass's bottom edge; the zones, verdict, setback, glare spots, ghost lamp and the
+  light level on the glass use the leaning plane. There is no on-screen control for the lean yet:
+  it is set through the controller (LEAF), not by the wearer.
+
+Unit tests (tests/glareMath.test.mjs, 54/54; the 50 earlier tests unchanged and passing):
+- Upright glass: 3D equals the reference row for row (within 1e-9 cm) and the hand value
+  (200 - e) x d / 100 within 0.01 cm: seated 109 cm at 80.78 cm 73.51; child 104 cm at 62 cm 59.52;
+  a 96 cm eye at 62 cm 64.48 (LEAF C22). Glare point and image equal too.
+- A forward lean against a side-view mirror worked apart from GlareMath, at 3, 5 and 10 deg, for
+  160, 109 and 104 cm (within 0.05 cm). At 5 deg: standing 27.76, seated 52.28, child seated 54.68 cm
+  (upright 32.31, 73.51, 77.55). The glare point lies on the leaning plane.
+- Two lamps: the lobes are mirror images; each lobe edge is where that lamp's glare point appears
+  and disappears; with the 20 deg reflector the lobes part near their far end (two pieces at 67 cm,
+  a gap over 5 cm).
+- The switch: "2d" ignores a 5 deg lean (73.51); "3d" gives 52.28; verdict and setback follow it.
+
+LEAF (fail-fast): new C25 glare-c25-footprint-3d PASSED 22:02:11 (17.0 s). It printed:
+[C25] 3D footprint: Seated 73.51 cm upright (hand 73.51); lobes at 41 cm: L -50.00 to 100.76,
+R -100.76 to 50.00; flash alpha 0.72 to 0.94; at a 5 deg lean Seated 52.28 (hand 52.28), child
+seated 54.68 (hand 54.68)
+Break: break-proofs.log (22:12:41, the image ignoring the lean: "Seated at a 5 deg lean 89.51 vs
+hand 52.28"), GlareMath.ts restored byte-identical (sha256 442b1372...).
+The full suite on the new build runs after G2 (row 38).
+
+Floor view: the chosen eye height's zone on top (unchanged), others faint outlines (unchanged), the
+viewing-area band with its bold near edge (unchanged), plus a soft patch per lamp under the chosen
+zone (each lamp's rows, and the same rows widened by 4 cm, in one mesh, so it fades at the edge),
+and the warning fill now flashes (alpha 0.72 to 0.95 at 1.25 Hz; it never drops under 0.7, which
+C12's brightness check needs).
+Stills (Seated chosen, head turned 24 deg down, LEAF overlay hidden; media-g1-floor, recorded
+22:16:15, frames at 30.0 s and 38.5 s):
+- g1_floor_standard_setback.png: lights at 80.78 cm; Seated zone to 73.51 cm; the red warning fill
+  inside the viewing area; floor line "Glare in the viewing area: Seated, Child seated".
+- g1_floor_62cm.png: lights at 62 cm; Seated zone to 56.42 cm; no warning fill; "All three: clear".
+With the default 40 deg reflector the two lamps' lobes overlap almost entirely at this placement, so
+the per-lamp patches read as one soft-edged patch in these stills; the lobes part visibly with the
+20 deg reflector (unit test above).

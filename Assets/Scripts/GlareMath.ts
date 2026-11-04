@@ -22,6 +22,13 @@ export type Room = {
   glassHalfWidthCm: number
   beamDeg: number // full beam angle of the default fixture (a light's own beamDeg wins)
   candela: number // the default fixture's centre-beam intensity at full dimmer (a light's own wins)
+  // G1: which footprint the zones use. "3d" mirrors each lamp through the glass plane itself
+  // (zoneRows3D), which may lean forward; "2d" or unset is the side-view reference (zoneRows),
+  // which assumes upright glass in the wall plane.
+  footprint?: "2d" | "3d"
+  // G1: the frame's forward lean in degrees: the glass turns about its bottom edge, its top
+  // coming away from the wall. 0 or unset is upright. Only the 3D footprint reads it.
+  leanDeg?: number
 }
 
 export type Light = {
@@ -426,7 +433,7 @@ export function zoneRows(light: Light, h: number, stepCm: number = 2, room: Room
 export function combinedZoneRows(lights: Light[], h: number, stepCm: number = 2, room: Room = DEFAULT_ROOM): ZoneRow[] {
   const all: { k: number; r: ZoneRow }[] = []
   for (const light of lights) {
-    for (const r of zoneRows(light, h, stepCm, room)) all.push({ k: Math.floor(r.z0 / stepCm), r })
+    for (const r of rowsForLight(light, h, stepCm, room)) all.push({ k: Math.floor(r.z0 / stepCm), r })
   }
   all.sort((a, b) => a.k - b.k || a.r.xMin - b.r.xMin)
   const out: ZoneRow[] = []
@@ -447,6 +454,266 @@ export function combinedZoneRows(lights: Light[], h: number, stepCm: number = 2,
   if (cur !== null) out.push(cur)
   out.sort((a, b) => a.z0 - b.z0 || a.xMin - b.xMin)
   return out
+}
+
+// ---------------------------------------------------------------------------
+// G1: the 3D footprint. Each lamp is mirrored through the glass plane itself (which may lean
+// forward about its bottom edge); the line from an eye on the floor grid to that image glares
+// where it crosses the lit part of the glass rectangle. For upright glass this is the same
+// construction as zoneRows (the side-view reference, kept as it was), and the unit tests hold
+// the two together; with a lean only this path is right.
+// ---------------------------------------------------------------------------
+
+/** The glass plane: its bottom-centre point, the unit vector up the glass, its normal into the room, its height. */
+export type GlassFrame = { B: V3; u: V3; n: V3; heightCm: number }
+
+export function glassFrame(room: Room = DEFAULT_ROOM): GlassFrame {
+  const th = (room.leanDeg ?? 0) * DEG
+  const c = Math.cos(th)
+  const s = Math.sin(th)
+  return {
+    B: { x: 0, y: room.glassBottomCm, z: 0 },
+    u: { x: 0, y: c, z: s },
+    n: { x: 0, y: -s, z: c },
+    heightCm: room.glassTopCm - room.glassBottomCm,
+  }
+}
+
+/** A point on the glass from its height up the glass (s, cm from the bottom edge) and x. */
+export function glassPoint(sCm: number, xCm: number, room: Room = DEFAULT_ROOM): V3 {
+  const g = glassFrame(room)
+  return { x: xCm, y: g.B.y + sCm * g.u.y, z: g.B.z + sCm * g.u.z }
+}
+
+/** The lamp mirrored through the glass plane (leaning or not): the image the eye sees in the glass. */
+export function mirroredLamp3D(light: Light, room: Room = DEFAULT_ROOM): V3 {
+  const g = glassFrame(room)
+  const L = lightPosition(light, room)
+  const k = 2 * dot(sub(L, g.B), g.n)
+  return { x: L.x - k * g.n.x, y: L.y - k * g.n.y, z: L.z - k * g.n.z }
+}
+
+/**
+ * glarePoint through the glass plane itself: the eye-to-image line's crossing with the glass,
+ * when it lands inside the glass rectangle and inside the light's beam. Null otherwise, and
+ * when the eye or the lamp is not in front of the glass.
+ */
+export function glarePoint3D(eye: V3, light: Light, room: Room = DEFAULT_ROOM): V3 | null {
+  const g = glassFrame(room)
+  const en = dot(sub(eye, g.B), g.n)
+  const L = lightPosition(light, room)
+  if (en <= 0 || dot(sub(L, g.B), g.n) <= 0) return null
+  const I = mirroredLamp3D(light, room)
+  const In = dot(sub(I, g.B), g.n)
+  const t = en / (en - In)
+  const p = { x: eye.x + (I.x - eye.x) * t, y: eye.y + (I.y - eye.y) * t, z: eye.z + (I.z - eye.z) * t }
+  const sUp = dot(sub(p, g.B), g.u)
+  if (sUp < -1e-9 || sUp > g.heightCm + 1e-9) return null
+  if (Math.abs(p.x) > room.glassHalfWidthCm) return null
+  if (!inBeam(light, p, room)) return null
+  return p
+}
+
+/** litXAt along a line of the (possibly leaning) glass at height sCm up it: the lit x range, clipped to the glass. */
+function litXOnGlass(beam: Beam, sCm: number, room: Room, g: GlassFrame): Interval | null {
+  if (sCm < -1e-9 || sCm > g.heightCm + 1e-9) return null
+  const L = beam.L
+  const a = beam.a
+  const c = beam.c
+  const qy = g.B.y + sCm * g.u.y - L.y
+  const qz = g.B.z + sCm * g.u.z - L.z
+  // d = (x - Lx, qy, qz). Solve (d.a)^2 >= c^2 |d|^2 with d.a > 0, a quadratic in v = x - Lx.
+  const k = qy * a.y + qz * a.z
+  const m = qy * qy + qz * qz
+  const A = a.x * a.x - c * c
+  const Bq = 2 * a.x * k
+  const Cq = k * k - c * c * m
+  let lo: number
+  let hi: number
+  if (Math.abs(A) < 1e-12) {
+    if (Math.abs(Bq) < 1e-12) return null
+    const root = -Cq / Bq
+    if (Bq > 0) {
+      lo = root
+      hi = Number.POSITIVE_INFINITY
+    } else {
+      lo = Number.NEGATIVE_INFINITY
+      hi = root
+    }
+  } else {
+    const disc = Bq * Bq - 4 * A * Cq
+    if (disc < 0) return null
+    const r = Math.sqrt(disc)
+    const r1 = (-Bq - r) / (2 * A)
+    const r2 = (-Bq + r) / (2 * A)
+    if (A >= 0) return null // a cone wider than the angle to the glass: not used by the RXT13
+    lo = Math.min(r1, r2)
+    hi = Math.max(r1, r2)
+  }
+  const xMin = Math.max(lo + L.x, -room.glassHalfWidthCm)
+  const xMax = Math.min(hi + L.x, room.glassHalfWidthCm)
+  if (xMin > xMax) return null
+  const mid = (xMin + xMax) / 2
+  if ((mid - L.x) * a.x + qy * a.y + qz * a.z <= 0) return null // the cone's other nappe
+  return { min: xMin, max: xMax }
+}
+
+const SPAN3D_CACHE_SIZE = 8
+const span3dCache: { key: string; span: Interval | null }[] = []
+
+/**
+ * The lit part of the glass along its height (cm up the glass from the bottom edge, 0 to its
+ * height), for the 3D path. Kept by every input it reads, the lean included.
+ */
+export function litGlassSpan3D(light: Light, room: Room = DEFAULT_ROOM): Interval | null {
+  const key = `${litGlassSpanKey(light, room)}|${room.leanDeg ?? 0}`
+  let hit = span3dCache.find((e) => e.key === key)
+  if (!hit) {
+    hit = { key, span: computeLitGlassSpan3D(light, room) }
+    span3dCache.unshift(hit)
+    if (span3dCache.length > SPAN3D_CACHE_SIZE) span3dCache.pop()
+  }
+  return hit.span ? { min: hit.span.min, max: hit.span.max } : null
+}
+
+function computeLitGlassSpan3D(light: Light, room: Room): Interval | null {
+  const g = glassFrame(room)
+  const beam = beamOf(light, room)
+  const steps = 200
+  const H = g.heightCm
+  const lit = (s: number) => litXOnGlass(beam, s, room, g) !== null
+  const refine = (litS: number, unlitS: number, upward: boolean) => {
+    if (upward && unlitS >= H && lit(H)) return H
+    if (!upward && unlitS <= 0 && lit(0)) return 0
+    let a = litS
+    let b = unlitS
+    for (let i = 0; i < 40; i++) {
+      const m = (a + b) / 2
+      if (lit(m)) a = m
+      else b = m
+    }
+    return a
+  }
+  let top: number | null = null
+  let bottom: number | null = null
+  for (let i = 0; i <= steps; i++) {
+    const s = H - (H * i) / steps
+    if (lit(s)) {
+      top = refine(s, Math.min(H, s + H / steps), true)
+      break
+    }
+  }
+  if (top === null) return null
+  for (let i = 0; i <= steps; i++) {
+    const s = (H * i) / steps
+    if (lit(s)) {
+      bottom = refine(s, Math.max(0, s - H / steps), false)
+      break
+    }
+  }
+  return { min: bottom === null ? top : bottom, max: top }
+}
+
+/**
+ * For an eye at height h and distance z from the wall, the line to the lamp's image crosses
+ * the glass plane at a fraction t of the way, at height sUp up the glass. Neither depends on
+ * the eye's x (the glass turns about a horizontal line), so a floor row has one t and one sUp.
+ * Null when the eye is not in front of the glass.
+ */
+function rowHit(h: number, z: number, I: V3, g: GlassFrame): { t: number; sUp: number } | null {
+  const en = (h - g.B.y) * g.n.y + (z - g.B.z) * g.n.z
+  if (en <= 0) return null
+  const In = (I.y - g.B.y) * g.n.y + (I.z - g.B.z) * g.n.z
+  const eu = (h - g.B.y) * g.u.y + (z - g.B.z) * g.u.z
+  const Iu = (I.y - g.B.y) * g.u.y + (I.z - g.B.z) * g.u.z
+  const t = en / (en - In)
+  return { t, sUp: eu + t * (Iu - eu) }
+}
+
+/**
+ * The floor distance at which an eye at height h sees the image cross the glass at height
+ * sUp. The crossing height is a ratio of two linear functions of z, so this is exact:
+ * z = [In (a2 - s) - a1 (Iu - s)] / [b1 (Iu - s) - In b2] with en = a1 + b1 z and eu = a2 + b2 z.
+ */
+function depthForGlassHeight(h: number, sUp: number, I: V3, g: GlassFrame): number {
+  const a1 = (h - g.B.y) * g.n.y - g.B.z * g.n.z
+  const b1 = g.n.z
+  const a2 = (h - g.B.y) * g.u.y - g.B.z * g.u.z
+  const b2 = g.u.z
+  const In = (I.y - g.B.y) * g.n.y + (I.z - g.B.z) * g.n.z
+  const Iu = (I.y - g.B.y) * g.u.y + (I.z - g.B.z) * g.u.z
+  const den = b1 * (Iu - sUp) - In * b2
+  if (Math.abs(den) < 1e-12) return Number.POSITIVE_INFINITY
+  return (In * (a2 - sUp) - a1 * (Iu - sUp)) / den
+}
+
+/** zoneDepth for the 3D path: the near and far floor distance of one light's zone at eye height h. */
+export function zoneDepth3D(light: Light, h: number, room: Room = DEFAULT_ROOM): Interval | null {
+  const span = litGlassSpan3D(light, room)
+  if (!span) return null
+  const g = glassFrame(room)
+  if (dot(sub(lightPosition(light, room), g.B), g.n) <= 0) return null
+  const I = mirroredLamp3D(light, room)
+  // The eye is in front of the glass from zFront on (the leaning glass overhangs the floor).
+  const zFront = Math.max(0, g.n.z > 1e-12 ? (-(h - g.B.y) * g.n.y) / g.n.z + g.B.z : 0) + 1e-9
+  const start = rowHit(h, zFront, I, g)
+  if (!start || start.sUp >= span.max) return null
+  const far = depthForGlassHeight(h, span.max, I, g)
+  if (!Number.isFinite(far) || far <= zFront) return null
+  const near = start.sUp >= span.min ? (zFront <= 1e-6 ? 0 : zFront) : depthForGlassHeight(h, span.min, I, g)
+  return { min: Math.max(0, near), max: far }
+}
+
+/**
+ * zoneRows through the glass plane itself (G1): the same rows (stepCm deep, each with the x
+ * range of eye positions that see this light's reflection), with the lamp mirrored through
+ * the possibly leaning glass. For upright glass it equals zoneRows (unit tests).
+ */
+export function zoneRows3D(light: Light, h: number, stepCm: number = 2, room: Room = DEFAULT_ROOM): ZoneRow[] {
+  const depth = zoneDepth3D(light, h, room)
+  if (!depth) return []
+  const g = glassFrame(room)
+  const I = mirroredLamp3D(light, room)
+  const beam = beamOf(light, room)
+  const rows: ZoneRow[] = []
+  const start = Math.floor(depth.min / stepCm) * stepCm
+  for (let z0 = start; z0 < depth.max; z0 += stepCm) {
+    const z1 = Math.min(z0 + stepCm, depth.max)
+    const zc = Math.max((Math.max(z0, depth.min) + z1) / 2, 1e-6)
+    const hit = rowHit(h, zc, I, g)
+    if (!hit) continue
+    const lit = litXOnGlass(beam, hit.sUp, room, g)
+    if (!lit) continue
+    const xa = (lit.min - hit.t * I.x) / (1 - hit.t)
+    const xb = (lit.max - hit.t * I.x) / (1 - hit.t)
+    rows.push({ z0: Math.max(z0, depth.min), z1, xMin: Math.min(xa, xb), xMax: Math.max(xa, xb) })
+  }
+  return rows
+}
+
+/** One light's rows by the room's footprint: the 3D path when it is "3d", else the side-view reference. */
+export function rowsForLight(light: Light, h: number, stepCm: number = 2, room: Room = DEFAULT_ROOM): ZoneRow[] {
+  return room.footprint === "3d" ? zoneRows3D(light, h, stepCm, room) : zoneRows(light, h, stepCm, room)
+}
+
+/** One light's near and far floor distance by the room's footprint. */
+export function zoneDepthFor(light: Light, h: number, room: Room = DEFAULT_ROOM): Interval | null {
+  return room.footprint === "3d" ? zoneDepth3D(light, h, room) : zoneDepth(light, h, room)
+}
+
+/** Each light's own rows (its lobe), unmerged, by the room's footprint: one list per light. */
+export function lobeRows(lights: Light[], h: number, stepCm: number = 2, room: Room = DEFAULT_ROOM): ZoneRow[][] {
+  return lights.map((l) => (lightComputable(l) ? rowsForLight(l, h, stepCm, room) : []))
+}
+
+/** The glare point by the room's footprint (the 3D path when it is "3d"). */
+export function glarePointFor(eye: V3, light: Light, room: Room = DEFAULT_ROOM): V3 | null {
+  return room.footprint === "3d" ? glarePoint3D(eye, light, room) : glarePoint(eye, light, room)
+}
+
+/** The lamp's image by the room's footprint. */
+export function mirroredLampFor(light: Light, room: Room = DEFAULT_ROOM): V3 {
+  return room.footprint === "3d" ? mirroredLamp3D(light, room) : mirroredLamp(light, room)
 }
 
 /** Farthest depth reached by any of the rows (0 when there is no zone). */
@@ -697,10 +964,10 @@ export function passesViewingArea(
   halfWidthCm: number = VIEWING_HALF_WIDTH_CM,
   room: Room = DEFAULT_ROOM,
 ): boolean {
-  const depth = zoneDepth(light, h, room)
+  const depth = zoneDepthFor(light, h, room)
   if (!depth) return true
   if (depth.max < nearCm || depth.min > farCm) return true
-  const rows = zoneRows(light, h, 0.5, room)
+  const rows = rowsForLight(light, h, 0.5, room)
   for (const r of rows) {
     if (r.z1 < nearCm || r.z0 > farCm) continue
     if (r.xMax < -halfWidthCm || r.xMin > halfWidthCm) continue
@@ -807,6 +1074,79 @@ export function setbackLabel(cm: number): string {
 }
 
 // ---------------------------------------------------------------------------
+// G2: wheelchair coverage, an ESTIMATE. UK DfT "Inclusive Mobility" (2021), section 3.3, p. 21:
+// wheelchair users' eye height "from 960mm to 1250mm" (5th to 95th percentile); verbatim in
+// devpost/sources/dft_inclusive_mobility_eye_height.md. A normal distribution fitted to those two
+// percentiles is an assumption made here, not the source's: mean 110.5 cm, sd 8.82 cm.
+// devpost/tools/coverage_estimate.py computes the same figures by hand formula; the unit tests
+// hold the two together.
+// ---------------------------------------------------------------------------
+
+export const WHEELCHAIR_EYE_P5_CM = 96
+export const WHEELCHAIR_EYE_P95_CM = 125
+const Z95 = 1.6448536269514722
+export const WHEELCHAIR_EYE_MEAN_CM = (WHEELCHAIR_EYE_P5_CM + WHEELCHAIR_EYE_P95_CM) / 2
+export const WHEELCHAIR_EYE_SD_CM = (WHEELCHAIR_EYE_P95_CM - WHEELCHAIR_EYE_P5_CM) / (2 * Z95)
+
+/** erf by Abramowitz and Stegun 7.1.26 (absolute error under 1.5e-7). */
+function erf(x: number): number {
+  const s = x < 0 ? -1 : 1
+  const a = Math.abs(x)
+  const t = 1 / (1 + 0.3275911 * a)
+  const y = 1 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * Math.exp(-a * a)
+  return s * y
+}
+
+/** The standard normal cumulative distribution. */
+export function normalCdf(z: number): number {
+  return 0.5 * (1 + erf(z / Math.SQRT2))
+}
+
+/**
+ * The share (0 to 1) of wheelchair users whose eyes see glare in the viewing area with these
+ * lights, and the eye height below which they do (boundaryCm): the highest eye height whose zone
+ * reaches into the area (touching counts, as on the answer card), found on the room's own model
+ * by bisection, then the fitted normal's share below it. Null when a light cannot be computed.
+ */
+export function wheelchairGlareShare(
+  lights: Light[],
+  nearCm: number = VIEWING_NEAR_CM,
+  farCm: number = VIEWING_FAR_CM,
+  halfWidthCm: number = VIEWING_HALF_WIDTH_CM,
+  room: Room = DEFAULT_ROOM,
+): { share: number; boundaryCm: number } | null {
+  if (lights.length === 0 || !lights.every((l) => lightComputable(l))) return null
+  const glareAt = (h: number) => {
+    const r = eyeResultsFor(lights, [{ key: "w", h }], nearCm, farCm, halfWidthCm, 2, room)[0]
+    return !Number.isFinite(r.endCm) || r.insideCm !== null
+  }
+  const LO = 40
+  const HI = room.glassTopCm
+  let boundary: number
+  if (!glareAt(LO)) boundary = LO
+  else {
+    let a = LO
+    let b = HI
+    for (let i = 0; i < 40; i++) {
+      const m = (a + b) / 2
+      if (glareAt(m)) a = m
+      else b = m
+    }
+    boundary = a
+  }
+  const share = boundary <= LO ? 0 : normalCdf((boundary - WHEELCHAIR_EYE_MEAN_CM) / WHEELCHAIR_EYE_SD_CM)
+  return { share, boundaryCm: boundary }
+}
+
+/** The words for a share, always labelled as an estimate. */
+export function wheelchairReadout(share: number): string {
+  const pct = share * 100
+  if (pct < 0.5) return "Under 1% of wheelchair users see glare here (estimate)"
+  if (pct > 99.5) return "Over 99% of wheelchair users see glare here (estimate)"
+  return `About ${Math.round(pct)}% of wheelchair users see glare here (estimate)`
+}
+
+// ---------------------------------------------------------------------------
 // The computed light level.
 // ---------------------------------------------------------------------------
 
@@ -821,7 +1161,8 @@ export function illuminanceLux(light: Light, p: V3, room: Room = DEFAULT_ROOM): 
   const d = sub(L, p)
   const dist = length(d)
   if (dist <= 1e-9) return 0
-  const cosIncidence = d.z / dist // the glass faces +z
+  // The glass faces +z when upright; a leaning frame (G1) faces along its tilted normal.
+  const cosIncidence = room.leanDeg ? dot(d, glassFrame(room).n) / dist : d.z / dist
   if (cosIncidence <= 0) return 0
   const metres = dist / 100
   return (candelaOf(light, room) * clamp(light.dimmer, 0, 1) * cosIncidence) / (metres * metres)

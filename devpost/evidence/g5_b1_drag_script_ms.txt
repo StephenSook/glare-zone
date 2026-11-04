@@ -1,0 +1,27 @@
+G5 / B1: drag script time, before and after the B1 fix, on one named LEAF scenario.
+
+Scenario: perf-exerciser-long (Assets/Tests/GlarePerfExerciserLong.ts; the aim-handle drags of
+perf-exerciser for about 36 s). Lens Studio 5.23.2 preview, Sunlit Room, Lens Studio in the
+foreground. Metric: Scene::Update (the Lens's script update) in ms per frame, from Perfetto's trace
+processor; frames from 2 s after the trace's first frame for the B1 pair (the Lens reset), all
+frames for the current build (the trace started 27 s after the run was queued, inside the drags;
+its per-second Scene::Update is 3.7 to 4.7 ms in every second, so every second has drags).
+Summary script: perf_b1.py (session scratchpad), the same definitions as BUILD_LOG row 22.
+Traces: performance_traces/ (gitignored, local to the Windows copy).
+
+| Build | Trace | Frames | Scene::Update ms/frame | p50 | p90 | Frame interval p50 |
+|---|---|---|---|---|---|---|
+| Before B1 (v0.4 code) | glare_b1_before_2026-11-03T04-48-12-764Z_preview0.pftrace | 206 in 7.9 s | 9.59 | 10.56 | 11.37 | 39.32 ms |
+| After B1 | glare_b1_after_2026-11-03T05-05-58-889Z_preview0.pftrace | 355 in 8.0 s | 3.98 | 4.19 | 4.39 | 22.41 ms |
+| Current build (2026-11-03 21:35, after B3 to B7, the cue and the limits line) | glare_g5_current_2026-11-04T02-35-15-574Z_preview0.pftrace | 296 in 10.0 s | 4.09 | 4.52 | 4.82 | 33.81 ms |
+
+Result: script time while dragging fell from 9.59 to 3.98 ms/frame with B1 and is 4.09 ms/frame on
+the current build (within 0.11 ms of the B1 result; the later items did not bring the rise back).
+The current trace's frame interval (29.7 fps) is slower than the B1 "after" trace (44.6 fps) while
+the script time is the same: during it a RustDesk remote session was streaming this desktop, which
+the B1 traces did not have. Frame rate here is not a SPECS figure in any case (desktop preview).
+
+Recomputed on 2026-11-03 21:3x from the trace files with:
+  .venv-perfetto/Scripts/python.exe -I perf_b1.py 2 <before> <after>
+  .venv-perfetto/Scripts/python.exe -I perf_b1.py 0 <current>
+The before and after figures match BUILD_LOG row 22 exactly.

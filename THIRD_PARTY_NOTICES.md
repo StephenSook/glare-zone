@@ -17,11 +17,12 @@ None of the Lens Studio packages below contains a licence file. Where this file 
 
 Removed in v0.4 (BUILD_LOG row 10): Icons.lspkg and Motion.lspkg, which came with the UI Kit install and were not used by any script, package or asset.
 
-## Lamp photometry (data, not files)
+## Published data used (numbers, not files)
 
 | Item | Origin | What is used | Notes |
 |---|---|---|---|
 | TSLight RXT13 track head (Xicato module, 1,235 lm delivered) | TSLight (tslight.com), "RXT Series" specification sheet, V2026.03.03: https://www.tslight.com/downloads/m-512/1d99ff1244e54a47be5f206f3174b108/rxt-series-specification-sheet | Four numbers from its centre-beam candlepower table (page 2, tested at 3000K, CRI 83): the 40 deg reflector at 2,700 cd (the Lens's default) and the 20 deg reflector at 5,000 cd; and two numbers from its footcandle table (page 3, RXT13 at 5 ft: 200 fc and 108 fc), used only by a unit test that checks them against E = I / d^2 | Manufacturer data, not measured. Only these numbers are copied; the PDF and any IES file are not in the project. The sheet describes the fixture as "ideal for museum and retail lighting". Its "Maximum Operating Angle: 45 deg from vertical" is not enforced by the Lens (BUILD_LOG Known limits) |
+| Wheelchair users' eye height (UK) | Department for Transport, "Inclusive Mobility" (December 2021), section 3.3, PDF page 21: https://assets.publishing.service.gov.uk/media/61d32bb7d3bf7f1f72b5ffd2/inclusive-mobility-a-guide-to-best-practice-on-access-to-pedestrian-and-transport-infrastructure.pdf | Two numbers: the 5th and 95th percentiles, 960 mm and 1250 mm, for the wheelchair estimate (`devpost/tools/coverage_estimate.py`, `GlareMath.wheelchairGlareShare`) | The verbatim sentence and the check are in `devpost/sources/dft_inclusive_mobility_eye_height.md`. The PDF is not in the project. The normal fit to the two numbers is ours |
 
 ## Starting template and editor plugin
 

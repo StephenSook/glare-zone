@@ -1,0 +1,18 @@
+G5 / B4: the palm menu within reach of LEAF's IK arm.
+
+Still: g5_b4_palm_menu_ik_reach.png (1128 x 1192, the Lens Studio preview's render area).
+Taken from a screen recording (ffmpeg gdigrab, 15 fps) of a glare-c19-ik-reach run with
+__leaf__diagnostic_policy = fail-fast, on 2026-11-03: recording started 21:42:17, still at 41.2 s
+(about 21:42:58). The LEAF banner at the top names the run. The palm menu ("Place on a wall",
+"Place in front of me", "Bring panels here") is shown where a raised left palm puts it (40 cm
+ahead of the eye, 20 cm down), and LEAF's IK hand (the adult arm model) is reaching it, the index
+finger at "Place in front of me".
+
+The same run's log (Lens Studio log, 21:43:03.199):
+[C19] reached with the IK arm (policy fail-fast, reach diagnostics 0): Eye height button, More
+button, More button, Save results button, Done button, Bring panels here button, Place in front of
+me button, Place on a wall button
+PASSED: glare-c19-ik-reach at 21:43:05.016 (28.2 s).
+
+Each palm button is pressed by SIK's physical proximity (a poke from the IK finger), and C19
+asserts after every press that LEAF recorded no reach diagnostic (BUILD_LOG rows 20 and 24).

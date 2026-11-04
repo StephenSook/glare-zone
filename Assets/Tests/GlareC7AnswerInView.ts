@@ -145,12 +145,14 @@ export class GlareC7AnswerInView extends Scenario {
       }
     }
 
-    // While a light moves, each eye height's change line shows on the card too: in view and
-    // inside it (both lights to 62 cm, then back).
+    // While a light moves, each other eye height's change line shows on the card too: in view and
+    // inside it (both lights to 62 cm, then back). The chosen height (Standing) has none: its
+    // distance is the headline's (U1, each distance once on screen).
     for (let i = 0; i < 2; i++) c.setLightDistance(i, 62)
     await sleep(300)
     const cardNow = angularRect(c, c.answerPlateCorners())
-    for (const k of ["standing", "seated", "child"] as ZoneKey[]) {
+    expect(c.mapLaneText("standing"), "moving: no change line for the chosen height").toBe("")
+    for (const k of ["seated", "child"] as ZoneKey[]) {
       expect(c.mapLaneText(k).indexOf(" to ") > 0, `moving: ${k} change line shown (${c.mapLaneText(k)})`).toBe(true)
       expect(outOfView(c, aabbCorners(c.mapLaneTextComponent(k)), 0.5), `moving: ${k} change line in view`).toBe("")
       const oc = overhang(angularRect(c, aabbCorners(c.mapLaneTextComponent(k))), cardNow)

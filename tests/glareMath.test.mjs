@@ -777,3 +777,139 @@ test("B7: a My eyes height under 104 cm is named beside the verdict, with its ow
   assert.equal(G.verdictTextWithEye(three(62), names, broken), "All three: clear; My eyes (96 cm): glare")
   assert.equal(G.overallVerdictWithEye(three(62), broken), "glare")
 })
+
+// G1: the 3D footprint (each lamp mirrored through the glass plane itself, which may lean
+// forward about its bottom edge). The side-view functions above stay as the reference.
+const R3 = { ...G.DEFAULT_ROOM, footprint: "3d" }
+const leanRoom = (deg) => ({ ...G.DEFAULT_ROOM, footprint: "3d", leanDeg: deg })
+
+// Hand check written apart from GlareMath: in the side view (height y, distance z), mirror the
+// lamp (300, D) through the glass line from (100, 0) at `leanDeg` from upright, then follow the
+// line from that image through the glass top (100 cm up the glass) down to eye height h.
+function sideViewReach(h, D, leanDeg) {
+  const th = (leanDeg * Math.PI) / 180
+  const B = [100, 0]
+  const u = [Math.cos(th), Math.sin(th)]
+  const n = [-Math.sin(th), Math.cos(th)]
+  const L = [300, D]
+  const k = 2 * ((L[0] - B[0]) * n[0] + (L[1] - B[1]) * n[1])
+  const I = [L[0] - k * n[0], L[1] - k * n[1]]
+  const T = [B[0] + 100 * u[0], B[1] + 100 * u[1]]
+  const lam = (h - I[0]) / (T[0] - I[0])
+  return I[1] + lam * (T[1] - I[1])
+}
+
+test("G1: on upright glass the 3D footprint equals the side-view reference (73.51, 59.52, 64.48)", () => {
+  // Hand: end = (200 - e) x d / 100 with the whole glass lit.
+  for (const [h, D, hand] of [[109, 80.78, 73.51], [104, 62, 59.52], [96, 62, 64.48]]) {
+    const lights = standardLights(D)
+    const ref = G.combinedZoneRows(lights, h, 2)
+    const r3 = G.combinedZoneRows(lights, h, 2, R3)
+    near(G.zoneFarEdge(ref), hand, 0.1, `2D ${h} cm at ${D}`)
+    near(G.zoneFarEdge(r3), hand, 0.1, `3D ${h} cm at ${D}`)
+    near(G.zoneFarEdge(r3), ((200 - h) * D) / 100, 0.01, `3D vs (200 - e) x d / 100, ${h} cm at ${D}`)
+    assert.equal(r3.length, ref.length, `${h} cm at ${D}: row count`)
+    for (let i = 0; i < ref.length; i++) {
+      for (const f of ["z0", "z1", "xMin", "xMax"]) near(r3[i][f], ref[i][f], 1e-9, `${h} cm at ${D}, row ${i} ${f}`)
+    }
+  }
+  // The glare point and the image of the lamp agree too.
+  const l = standardLights()[1]
+  const eye = { x: 10, y: 109, z: 50 }
+  const p2 = G.glarePoint(eye, l)
+  const p3 = G.glarePoint3D(eye, l, R3)
+  for (const f of ["x", "y", "z"]) near(p3[f], p2[f], 1e-9, `glare point ${f}`)
+  const m2 = G.mirroredLamp(l)
+  const m3 = G.mirroredLamp3D(l, R3)
+  for (const f of ["x", "y", "z"]) near(m3[f], m2[f], 1e-9, `image ${f}`)
+})
+
+test("G1: a forward lean of the frame, against a side-view mirror worked apart from GlareMath", () => {
+  const lights = standardLights()
+  for (const lean of [3, 5, 10]) {
+    const r = leanRoom(lean)
+    const span = G.litGlassSpan3D(lights[1], r)
+    assert.ok(span.min <= 1e-6 && span.max >= 100 - 1e-6, `lean ${lean}: the whole glass is still lit`)
+    for (const h of [160, 109, 104]) {
+      near(G.zoneFarEdge(G.combinedZoneRows(lights, h, 2, r)), sideViewReach(h, 80.78, lean), 0.05, `lean ${lean}, ${h} cm`)
+    }
+  }
+  // Hand values at 5 deg: standing 27.76, seated 52.28, child seated 54.68 (upright: 32.31, 73.51, 77.55).
+  near(sideViewReach(109, 80.78, 5), 52.28, 0.01, "seated at 5 deg")
+  near(G.zoneFarEdge(G.combinedZoneRows(lights, 109, 2, leanRoom(5))), 52.28, 0.05, "3D seated at 5 deg")
+  // A glare point at a lean lies on the leaning glass, out from the wall.
+  const r5 = leanRoom(5)
+  const p = G.glarePoint3D({ x: 0, y: 109, z: 50 }, lights[1], r5)
+  const g = G.glassFrame(r5)
+  near((p.x - g.B.x) * g.n.x + (p.y - g.B.y) * g.n.y + (p.z - g.B.z) * g.n.z, 0, 1e-9, "the point is on the glass plane")
+  assert.ok(p.z > 0, "the leaning glass is out from the wall there")
+  // Past the far edge, no glare.
+  assert.equal(G.glarePoint3D({ x: 0, y: 109, z: 52.28 + 0.5 }, lights[1], r5), null)
+})
+
+test("G1: two lamps are two lobes; with the 20 deg reflector they part near their far end", () => {
+  const lights = standardLights().map((l) => ({ ...l, beamDeg: 20, candela: 5000 }))
+  const lobes = G.lobeRows(lights, 109, 2, R3)
+  assert.equal(lobes.length, 2)
+  const at = (rows, z) => rows.find((r) => r.z0 <= z && r.z1 > z)
+  // Each lobe is the mirror image of the other (lamps at x = -50 and +50).
+  const a = at(lobes[0], 40)
+  const b = at(lobes[1], 40)
+  near(a.xMin, -b.xMax, 1e-9, "mirror images, left edge")
+  near(a.xMax, -b.xMin, 1e-9, "mirror images, right edge")
+  // Each lobe edge is where that lamp's glare point appears and disappears (eye at the row's centre depth).
+  for (const [i, lobe] of [[0, a], [1, b]]) {
+    const z = (lobe.z0 + lobe.z1) / 2
+    assert.ok(G.glarePoint3D({ x: lobe.xMin + 0.2, y: 109, z }, lights[i], R3), `lamp ${i}: glare just inside the left edge`)
+    assert.ok(G.glarePoint3D({ x: lobe.xMax - 0.2, y: 109, z }, lights[i], R3), `lamp ${i}: glare just inside the right edge`)
+    assert.equal(G.glarePoint3D({ x: lobe.xMax + 0.2, y: 109, z }, lights[i], R3), null, `lamp ${i}: none just past the right edge`)
+  }
+  // Near the far end the two lobes no longer touch: the merged rows keep two pieces.
+  const comb = G.combinedZoneRows(lights, 109, 2, R3).filter((r) => r.z0 <= 67 && r.z1 > 67)
+  assert.equal(comb.length, 2, "two pieces at 67 cm")
+  assert.ok(comb[1].xMin - comb[0].xMax > 5, `a gap between the lobes (${(comb[1].xMin - comb[0].xMax).toFixed(2)} cm)`)
+})
+
+test("G1: the switch: the side-view footprint ignores the lean, the 3D one does not", () => {
+  const lights = standardLights()
+  const off = { ...G.DEFAULT_ROOM, footprint: "2d", leanDeg: 5 }
+  near(G.zoneFarEdge(G.combinedZoneRows(lights, 109, 2, off)), 73.51, 0.01, "2D at a 5 deg lean is still upright")
+  near(G.zoneFarEdge(G.combinedZoneRows(lights, 109, 2, leanRoom(5))), 52.28, 0.05, "3D at a 5 deg lean")
+  // The verdict and the setback follow the footprint of the room.
+  const eyes3 = G.eyeResultsFor(lights, G.VERDICT_HEIGHTS, 60, 182, 100, 2, leanRoom(5))
+  near(eyes3[2].endCm, 54.68, 0.05, "child seated at 5 deg")
+  assert.equal(G.overallVerdict(eyes3), "clear", "a 5 deg lean clears the standard placement")
+  assert.equal(G.suggestSetbackCm(lights, 60, 182, 100, G.VERDICT_HEIGHTS, leanRoom(5)), lights[0].distanceCm)
+})
+
+// G2: wheelchair coverage, an estimate (DfT Inclusive Mobility 2021, p. 21: 960 to 1250 mm, 5th to
+// 95th percentile; normal fit mean 110.5, sd 8.82 cm). The figures below are the output of
+// devpost/tools/coverage_estimate.py (its own unit tests recompute them by hand): the Lens's model
+// must give the same shares for upright glass lit to its top.
+test("G2: the Lens's wheelchair share matches coverage_estimate.py (96, 67, 23, 20, 5 %)", () => {
+  near(G.WHEELCHAIR_EYE_MEAN_CM, 110.5, 1e-9, "mean")
+  near(G.WHEELCHAIR_EYE_SD_CM, 8.8154, 1e-4, "sd")
+  near(G.normalCdf((96 - 110.5) / G.WHEELCHAIR_EYE_SD_CM), 0.05, 1e-6, "5th percentile back")
+  near(G.normalCdf((125 - 110.5) / G.WHEELCHAIR_EYE_SD_CM), 0.95, 1e-6, "95th percentile back")
+  for (const [D, pct, boundary] of [[80.78, 95.79, 200 - 6000 / 80.78], [70, 66.62, 200 - 6000 / 70],
+    [62.5, 23.05, 104], [62, 20.46, 200 - 6000 / 62], [57.69, 5.0, 200 - 6000 / 57.69]]) {
+    for (const room of [G.DEFAULT_ROOM, R3]) {
+      const r = G.wheelchairGlareShare(standardLights(D), 60, 182, 100, room)
+      near(r.boundaryCm, boundary, 1e-6, `boundary at ${D} cm (${room.footprint || "2d"})`)
+      near(100 * r.share, pct, 0.006, `share at ${D} cm (${room.footprint || "2d"})`)
+    }
+  }
+  assert.equal(G.wheelchairReadout(G.wheelchairGlareShare(standardLights(80.78), 60, 182, 100, R3).share),
+    "About 96% of wheelchair users see glare here (estimate)")
+  assert.equal(G.wheelchairReadout(G.wheelchairGlareShare(standardLights(62), 60, 182, 100, R3).share),
+    "About 20% of wheelchair users see glare here (estimate)")
+  assert.equal(G.wheelchairReadout(0.001), "Under 1% of wheelchair users see glare here (estimate)")
+  assert.equal(G.wheelchairReadout(0.999), "Over 99% of wheelchair users see glare here (estimate)")
+  // No glare at all (beams tilted to 80 deg miss the glass): none of them.
+  const off = standardLights().map((l) => ({ ...l, tiltDeg: 80 }))
+  assert.equal(G.wheelchairGlareShare(off, 60, 182, 100, R3).share, 0)
+  // A light that cannot be computed gives no estimate.
+  assert.equal(G.wheelchairGlareShare([{ ...standardLights()[0], distanceCm: Number.NaN }], 60, 182, 100, R3), null)
+  // A forward lean lowers it (5 deg: every eye's zone is shorter).
+  assert.ok(G.wheelchairGlareShare(standardLights(), 60, 182, 100, leanRoom(5)).share < 0.5)
+})

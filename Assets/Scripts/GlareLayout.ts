@@ -17,7 +17,7 @@
 // Pinch targets (Snap sizing guide): at least 2 deg across and at least 1 deg apart.
 // At about 1 m: 3.5 cm and 1.75 cm. At 3 m: 10.5 cm and 5.2 cm.
 
-export const LENS_VERSION = "v0.4"
+export const LENS_VERSION = "v0.5"
 
 export const LAYOUT = {
   startDistanceCm: 300, // the user starts this far back from the wall

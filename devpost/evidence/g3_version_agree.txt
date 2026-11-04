@@ -1,0 +1,15 @@
+G3: version v0.5 in LENS_VERSION, the README sections, and the label the Lens shows and prints.
+
+One grep over the three (code, README, the Lens's own log of what it shows):
+$ grep -n -o 'LENS_VERSION = "v0\.5"\|^v0\.5 \|Version: v0\.5\|Lens Opened: v0\.5' Assets/Scripts/GlareLayout.ts devpost/README_v04_sections.md <Lens Studio log>
+Assets/Scripts/GlareLayout.ts:20:LENS_VERSION = "v0.5"
+devpost/README_v04_sections.md:14:v0.5
+devpost/README_v04_sections.md:68:Version: v0.5
+C:/Users/<user>/AppData/Local/Snap/Lens Studio/logs/LensStudioLog-2026-11-02-20-53-53-934-8bf1c.txt:24809:Lens Opened: v0.5
+(the log line repeats each time the Lens opens; 2 times so far, all v0.5 since the change; the last one is shown)
+
+On screen: the answer card's bottom-right label reads "v0.5" (still: g3_onscreen_version_label.png, the card's top 140 px of the preview,
+taken 2026-11-03 21:48 after the C1 run). C1 asserts it: expect(c.versionText(), "version shown").toBe("v0.5"); PASSED 21:48:01.751, fail-fast.
+The label reads LENS_VERSION (GlareZoneController.ts, versionLabel), so code and screen cannot differ.
+
+(Windows user folder redacted.)

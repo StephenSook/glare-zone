@@ -1,0 +1,38 @@
+G2: wheelchair coverage readout, "about N% of wheelchair users see glare here", labelled an estimate.
+
+Source, stored before the readout shipped: devpost/sources/dft_inclusive_mobility_eye_height.md
+(UK DfT "Inclusive Mobility", December 2021, section 3.3, PDF page 21; verbatim: "eye height, which
+is around 120-130mm below seated height, giving a 5th-95th percentile range for wheelchair users from
+960mm to 1250mm (1080mm to 1315mm for mobility scooter users)"; the PDF is not in the project).
+
+Assumption (ours, not the source's): eye height is normal, fitted to the two percentiles:
+mean 110.5 cm, sd (125 - 96) / (2 x 1.6449) = 8.8154 cm ("8.82").
+
+Script: devpost/tools/coverage_estimate.py (hand formula: glare for eyes at or below
+h* = 200 - 6000 / D with the whole upright glass lit and the viewing area from 60 cm;
+share = Phi((h* - 110.5) / sd)). Output:
+  lights  80.78 cm out: glare for eyes at or below 125.724 cm,  95.79% -> "About 96% of wheelchair users see glare here (estimate)"
+  lights  70.00 cm out: glare for eyes at or below 114.286 cm,  66.62% -> "About 67% ..."
+  lights  62.50 cm out: glare for eyes at or below 104.000 cm,  23.05% -> "About 23% ..."
+  lights  62.00 cm out: glare for eyes at or below 103.226 cm,  20.46% -> "About 20% ..."
+  lights  57.69 cm out: glare for eyes at or below  95.996 cm,   5.00% -> "About 5% ..."
+Its unit tests: devpost/tools/test_coverage_estimate.py, 6/6 (python -m unittest): the fit puts
+the 5th and 95th percentiles back at 96 and 125 cm; each table figure recomputed with math.erf.
+
+The Lens: GlareMath.wheelchairGlareShare finds h* on the zones' own model (the 3D footprint, any
+lean) by bisection, and wheelchairReadout words it; node unit test (tests/glareMath.test.mjs, 55/55)
+holds it to the script's figures in both the 2D and 3D rooms, gives 0 when the beams miss the glass,
+none for a broken light, and a lower share at a 5 deg lean. On the answer card the line sits bottom
+left, at rest only (hidden while a light moves and over the results cards); it is solved when a change
+settles.
+
+LEAF (fail-fast): new C26 glare-c26-wheelchair-estimate PASSED 22:29:27 (7.6 s):
+[C26] wheelchair estimate: 80.78 cm "About 96% ..." (hand 95.79%), 62 cm "About 20% ..." (hand 20.46%),
+boundary at 62 cm 103.226 cm
+(its Phi is a power series written in the test, apart from GlareMath's erf.)
+Break: break-proofs.log (22:35:11, the readout without "(estimate)"), GlareMath.ts restored
+byte-identical (sha256 941574ca...).
+
+What it says about the 62 cm demo: the card reads "All three: clear" there (160, 109 and 104 cm),
+and about 20% of wheelchair users (eyes at or below 103.2 cm) would still see glare in the viewing
+area, by this estimate. The 62 cm demo and the three eye heights are unchanged.

@@ -1,0 +1,33 @@
+U1: wording and few-words pass on the current build (2026-11-04).
+
+Checked on screen first (before stills, media helper media-u1-words, LEAF overlay hidden):
+- u1_before_opening.png: the Eye height button's hint read "click to change".
+- u1_before_seated_floor.png (Seated, head 14 deg down, card and floor together): 73.5 cm twice, on the
+  answer card's headline ("Seated: glare up to 73.5 cm (2 ft 5 in) from the wall") and on the floor
+  label ("Seated: glare up to 73.5 cm from the wall").
+- u1_before_moving.png (a light moving): 73.5 a third time, in the Seated change line.
+
+Changes (Assets/Scripts):
+- GlareZoneUI.ts: "click to change" -> "pinch to change". grep -rni click Assets/Scripts/*.ts: no match.
+- GlareZoneController.ts: the floor label is the colour tag only ("Seated", in its colour); the distance
+  is the card headline's, which is the one readable at the standard setback (the floor is out of view
+  in the opening view). While a light moves, the chosen eye height has no change line (the headline
+  shows its live distance); the other heights' lines close up under the disclosure.
+- Kept: the honesty line "Computed for flat glass in this room; manufacturer lamp data, not measured".
+  Kept, by choice: the floor's verdict line ("Glare in the viewing area: Seated, Child seated"). It does
+  not restate the floor chart (it names all three eye heights) and on a device it is the verdict you can
+  read while looking down at the floor, when the card (above the eye line) is out of view.
+- Not changed: the results view (after Save results) lists each light's own distances on its card, so
+  a distance can appear there more than once (per light); those cards are the saved record.
+After stills: u1_after_opening.png ("pinch to change"), u1_after_seated_floor.png (73.5 on the headline
+only; the floor label "Seated"), u1_after_moving.png (change lines for Standing and Child seated only).
+
+LEAF (fail-fast): new C27 glare-c27-words-once reads every enabled Text under the practice gallery
+(the near panels included): no "click"; "pinch to change" once; "73.5 cm" once at rest (the headline's);
+while both lights move to 62 cm each eye height's distance once; the honesty line shown. PASSED
+2026-11-04 13:02:30 (and 14:39:32 in the full run). It printed: [C27] 17 texts shown while moving; no
+"click"; "73.5 cm" once at rest; each height's distance once while moving.
+Break (break-proofs.log, 13:06:32): the floor label's distance restored: C27 FAILED, "73.5 cm" on screen
+2 times (the floor label and the headline). Restored byte-identical.
+Text assertions updated: C1 and C12 (the floor label is the name), C7 and C16 (no change line for the
+chosen height; the headline carries it). Full run: 28 of 28 (BUILD_LOG row 41).
